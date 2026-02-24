@@ -1,0 +1,55 @@
+task:
+  name: "Tg Optimization - Agentic Workflow (Pilot)"
+  surrogate: gnn_tg
+  dataset: /noether/s0/dxb5775/agentic-prompt-optimization/data/tg_train.csv
+  smiles_column: SMILES
+  sample_size: 30
+
+  molecule_type: "polymer"
+  domain_context: >
+    '*' marks the repeat-unit attachment points (two per SMILES, PolyInfo convention).
+    Every generated SMILES MUST contain exactly two '*' characters.
+    The goal is to maximise glass transition temperature (Tg in °C).
+    Higher Tg → better thermal stability, mechanical strength, and potential use in
+    high-performance films, membranes, and structural composites.
+    Structural features that raise Tg: rigid aromatic backbones, bulky pendant groups,
+    cyclic structures, hydrogen-bond donors/acceptors, strong inter-chain interactions.
+    Avoid: long flexible aliphatic chains, excessive ether linkages without compensating
+    rigidity, low-MW substituents that plasticise the chain.
+    Example high-Tg SMILES:
+      *c1ccc(C(=O)Nc2ccc(*)cc2)cc1
+      *OC(=O)c1ccc(C(=O)O*)cc1
+      *c1ccc(Oc2ccc(S(=O)(=O)c3ccc(*)cc3)cc2)cc1
+  smiles_markers: ["*"]
+  similarity_on_repeat_unit: true
+
+models:
+  # Agentic mode: Use best models based on strategic allocation experiments
+  worker: gemini/gemini-2.0-flash      # FREE - Good for generation, self-correction helps
+  critic: openai/gpt-4o                # BALANCED - Good for analysis & debate
+  meta: openai/gpt-4o                  # BALANCED - Good for strategic thinking
+
+optimization:
+  mode: agentic  # NEW: Use agentic workflow instead of loop
+  n_outer_epochs: 5  # Shorter pilot run
+  n_per_molecule: 4
+  batch_size: 6
+  meta_interval: 3
+  reward_function: pareto_hypervolume
+  seed_strategy: >
+    Generate polymer repeat-unit SMILES (with exactly two '*') to maximise
+    glass transition temperature (Tg in °C).
+    Prefer rigid aromatic backbones, imide/amide linkages, and bulky cyclic groups.
+    Each SMILES must contain exactly two '*'.
+
+  # Agentic-specific settings
+  max_retries_per_batch: 3  # Worker auto-retries invalid SMILES
+
+temperatures:
+  worker: 0.7   # Balanced creativity
+  critic: 0.3   # Focused analysis
+  meta: 0.4     # Strategic thinking
+
+output:
+  run_dir: ./results/tg_experiment_agentic
+  extract_knowledge: true

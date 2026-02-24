@@ -132,6 +132,14 @@ class RunLogger:
         with open(path, "w") as f:
             json.dump(history_list, f, indent=2, default=str)
 
+    def save_agent_trace(self, trace_name: str, trace_data: Dict) -> None:
+        """Save agent interpretability trace (thought process, self-corrections, debate)."""
+        traces_dir = self.run_dir / "agent_traces"
+        traces_dir.mkdir(exist_ok=True)
+        path = traces_dir / f"{trace_name}.json"
+        with open(path, "w") as f:
+            json.dump(trace_data, f, indent=2, default=str)
+
     def load_existing_epochs(self) -> List[Dict]:
         """Load existing epoch records from JSONL (for resume support)."""
         records = []

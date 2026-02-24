@@ -178,7 +178,14 @@ def run(cfg: Dict, api_keys_path: str = "api_keys.txt") -> str:
     model_cfg = cfg["models"]
     out_cfg = cfg.get("output", {})
 
-    if mode == "agent":
+    if mode == "agentic":
+        # NEW: Agentic workflow with ReAct agents, self-correction, debate
+        from .agentic_engine import run_agentic_mode
+        run_dir = run_agentic_mode(
+            cfg=cfg, ctx=ctx, all_smiles=all_smiles,
+            logger=logger, api_keys=api_keys,
+        )
+    elif mode == "agent":
         run_dir = _run_agent_mode(
             cfg=cfg, ctx=ctx, inner=inner, outer=outer, meta=meta,
             logger=logger, history=history, current_state=current_state,
