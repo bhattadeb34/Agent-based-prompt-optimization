@@ -1,0 +1,53 @@
+task:
+  name: "Conductivity Optimization Experiment - Strategic Models"
+  surrogate: gnn_conductivity
+  model_base_path: /noether/s0/dxb5775/prompt-optimization-work-jan-8/htpmd/ml_models
+  dataset: /noether/s0/dxb5775/agentic-prompt-optimization/data/train.csv
+  smiles_column: mol_smiles
+  sample_size: 30           # parents sampled per epoch from train set
+
+  molecule_type: "polymer electrolyte"
+  domain_context: >
+    [Cu] and [Au] are SYMBOLIC PLACEHOLDERS for polymer backbone connection points.
+    They are NOT actual copper or gold atoms — they mark where repeat units join.
+    Every generated SMILES MUST contain exactly one [Cu] and one [Au].
+    The goal is to maximise Li-ion conductivity by modifying the polymer architecture:
+    ether oxygen content, chain flexibility, polar side groups, and backbone connectivity.
+    Example valid SMILES:
+      CC(CO[Cu])CSCCOC(=O)[Au]
+      CC(CO[Cu])COCCOC(=O)[Au]
+      O=C([Au])NCCCCNC(=O)CCCN[Cu]
+  smiles_markers: ["[Cu]", "[Au]"]
+  similarity_on_repeat_unit: true
+
+models:
+  # STRATEGIC preset: Strong models where critical, cheap models for bulk/simple tasks
+  # Reasoning: Worker generates 240 SMILES (use free Gemini), Critic/Meta do strategic
+  # thinking (use premium GPT-5.2), Orchestrator does simple routing (use cheap GPT-4o-mini)
+  worker: gemini/gemini-2.0-flash                   # FREE - generates 240 SMILES/run
+  critic: openai/gpt-5.2-2025-12-11                 # PREMIUM - strategy refinement (10 calls)
+  meta: openai/gpt-5.2-2025-12-11                   # PREMIUM - strategic pivots (3 calls)
+  orchestrator: openai/gpt-4o-mini                  # CHEAP - tool routing (10 calls)
+  knowledge_extractor: openai/gpt-4o                # BALANCED - final analysis (1 call)
+
+optimization:
+  mode: loop                 # fixed 10-epoch loop for clean epoch tracking
+  n_outer_epochs: 10
+  n_per_molecule: 4          # candidates per parent
+  batch_size: 6              # parents sampled each epoch from the 30-subset
+  meta_interval: 3           # meta-strategist every 3 epochs
+  reward_function: pareto_hypervolume
+  seed_strategy: >
+    Generate polymer SMILES that maximise Li-ion conductivity while
+    maintaining structural similarity to the parent.
+    Focus on: ether oxygen density, backbone flexibility, polar pendant groups.
+    Each SMILES must contain exactly one [Cu] and one [Au].
+
+temperatures:
+  worker: 0.7      # Lower temperature for thinking model (more focused)
+  critic: 0.3      # Slightly higher for creativity in refinement
+  meta: 0.4        # Balanced exploration in strategic thinking
+
+output:
+  run_dir: ./results/conductivity_experiment_stronger
+  extract_knowledge: true

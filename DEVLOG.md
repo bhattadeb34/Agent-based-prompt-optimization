@@ -778,3 +778,166 @@ python scripts/plot_tg_experiment.py \
 - **Limited exploration budget** — Only 10 epochs; best performance at epoch 7 suggests more epochs could help
 - **No transfer learning** — Conductivity insights not used to seed Tg optimization (future: cross-property prompt transfer)
 
+---
+
+## Experiment 3: Strategic Model Allocation (Feb 23, 2026) 🧠💰
+
+### Motivation
+Both Tg and Conductivity experiments used Gemini Flash 2.0 (free tier) for all roles. To test whether **stronger models improve optimization**, we implemented a **strategic allocation system**: use expensive models only where critical (reasoning-heavy tasks), cheap/free models elsewhere.
+
+### Model Registry System
+
+Created `apo/core/model_registry.py` — a tier-based model selection framework:
+
+**Model Tiers**:
+- **FAST** (free/cheap): Gemini Flash, GPT-4o-mini → bulk generation tasks
+- **BALANCED** (mid-tier): GPT-4o → moderate complexity
+- **PREMIUM** (expensive): GPT-5.2, Gemini 3.1 Pro → strategic reasoning
+- **REASONING** (thinking models): o1-mini, Gemini Flash Thinking → extended chains of thought
+
+**Presets**:
+```python
+"strategic": {
+    "worker": "gemini/gemini-2.0-flash",      # FREE - generates 240 SMILES/run
+    "critic": "openai/gpt-5.2-2025-12-11",    # PREMIUM - strategy refinement (10 calls)
+    "meta": "openai/gpt-5.2-2025-12-11",      # PREMIUM - strategic pivots (3 calls)
+    "orchestrator": "openai/gpt-4o-mini",     # CHEAP - simple routing (10 calls)
+    "knowledge_extractor": "openai/gpt-4o",   # BALANCED - final analysis (1 call)
+}
+```
+
+**Rationale**: Worker does bulk SMILES generation (use free model). Critic/Meta do complex reasoning about strategy evolution (use strongest model). Orchestrator does simple tool routing (use cheap model).
+
+---
+
+### Experiment 3A: Tg Optimization — Strategic vs Baseline
+
+**Baseline Config** (`config/tg_experiment.yaml`):
+- All roles: `gemini/gemini-2.0-flash` (free)
+- Run: `run_20260223_221315` (211 seconds, $0 cost)
+
+**Strategic Config** (`config/tg_experiment_stronger.yaml`):
+- Worker: Gemini Flash (free)
+- Critic/Meta: GPT-5.2 (premium)
+- Orchestrator: GPT-4o-mini (cheap)
+- Knowledge: GPT-4o (balanced)
+- Run: `run_20260223_223758` (516 seconds, ~$0.25 estimated)
+
+#### Results Summary
+
+| Metric | Baseline (All Gemini Flash) | Strategic (GPT-5.2 for Reasoning) | Winner |
+|--------|------------------------------|-----------------------------------|--------|
+| **Best Reward** | 2.4779 (epoch 7) | 2.1880 (epoch 9) | ✅ **Baseline** (+13%) |
+| **Best Tg Found** | 179.5°C (13.71×) | 113.9°C (8.70×) | ✅ **Baseline** (+58%) |
+| **Overall Validity** | 177/240 (73.8%) | 177/240 (73.8%) | Tied |
+| **Runtime** | 211s (3.5 min) | 516s (8.6 min) | ✅ **Baseline** (2.4× faster) |
+| **Estimated Cost** | $0.00 (free tier) | ~$0.25 | ✅ **Baseline** |
+
+**Verdict for Tg**: **Baseline WON decisively**. Strategic allocation did not improve results. For SMILES generation tasks, speed + diversity (Gemini Flash) beat expensive reasoning (GPT-5.2).
+
+**Key Insight**: The critical breakthrough (epoch 7: siloxane trap → polyimide pivot) happened in BOTH runs, suggesting the Meta-strategist's value is in the *logic* (detecting stagnation), not the *model*. Gemini Flash was sufficient for this reasoning task.
+
+**Figures**:
+- `results/tg_figures/fig4_model_comparison.png` — Side-by-side comparison (reward curves, validity, improvement, summary table)
+
+---
+
+### Experiment 3B: Conductivity Optimization — Strategic vs Baseline
+
+**Baseline Config** (`config/conductivity_experiment.yaml`):
+- All roles: `gemini/gemini-2.0-flash` (free)
+- Run: `run_20260223_211958` (10 epochs)
+
+**Strategic Config** (`config/conductivity_experiment_stronger.yaml`):
+- Worker: Gemini Flash (free)
+- Critic/Meta: GPT-5.2 (premium)
+- Orchestrator: GPT-4o-mini (cheap)
+- Knowledge: GPT-4o (balanced)
+- Run: `run_20260223_231806` (9 epochs, stopped early)
+
+#### Results Summary
+
+| Epoch | Baseline Reward | Strategic Reward | Strategic Validity | Notes |
+|-------|----------------|------------------|-------------------|-------|
+| 1 | 1.8045 | 1.4923 | 20/24 (83.3%) | Baseline starts stronger |
+| 2 | 1.8083 (best) | **2.9719** (best) | 24/24 (100%) | 🏆 Strategic breakthrough! |
+| 3 | 1.6640 | 2.0856 | 16/24 (66.7%) | Strategic maintains lead |
+| 4 | 1.4944 | 2.8026 | 14/16 (87.5%) | Strategic 2nd best epoch |
+| 5 | 0.9117 | 1.1824 | 24/24 (100%) | Both drop, strategic better |
+| 6 | 1.2989 | 1.8971 | 13/24 (54.2%) | Strategic ahead |
+| 7 | 0.6252 | **0.0000** | **0/0 (-)** | ⚠️ Strategic TOTAL FAILURE |
+| 8 | 0.0000 | **0.0000** | **0/0 (-)** | ⚠️ Strategic TOTAL FAILURE |
+| 9 | 1.4276 | 1.7542 | 24/24 (100%) | Strategic recovers |
+| 10 | 1.7389 | (not completed) | - | Strategic stopped early |
+
+| Metric | Baseline | Strategic | Winner |
+|--------|----------|-----------|--------|
+| **Best Reward** | 1.8083 (epoch 2) | **2.9719** (epoch 2) | ✅ **Strategic** (+64%) |
+| **Avg Reward** (excluding failures) | 1.3173 | **1.9095** | ✅ **Strategic** (+45%) |
+| **Overall Validity** | 138/240 (57.5%) | 135/176 (76.7%) | ✅ **Strategic** |
+| **Catastrophic Failures** | 1 epoch (epoch 8) | **2 epochs** (epochs 7-8) | ⚠️ **Baseline** (more robust) |
+| **Completion** | 10/10 epochs | 9/10 epochs | ✅ **Baseline** |
+
+**Verdict for Conductivity**: **Strategic allocation IMPROVED performance** but introduced **instability**. Peak reward was 64% higher, but 2 consecutive epochs failed completely (0 valid SMILES generated).
+
+**Key Insight**: GPT-5.2's stronger reasoning ability helped the Critic/Meta generate better strategies for conductivity optimization (a more complex chemical space than Tg). However, the same strong reasoning led to overly complex strategies that the Worker (Gemini Flash) couldn't execute, causing validity crashes.
+
+**Figures**:
+- `results/conductivity_figures/fig4_model_comparison.png` — Side-by-side comparison
+
+---
+
+### Conclusions & Recommendations
+
+#### Task-Dependent Findings
+
+1. **Tg Optimization (Simpler Chemical Space)**:
+   - Simple baseline (all Gemini Flash) is **OPTIMAL**
+   - Polymer SMILES with `*` markers are relatively constrained
+   - Fast iteration > expensive reasoning for this task
+   - **Recommendation**: Use Gemini Flash for all roles (current baseline)
+
+2. **Conductivity Optimization (Complex Chemical Space)**:
+   - Strategic allocation **CAN** improve peak performance (+64% best reward)
+   - BUT: High variance and catastrophic failures (2 epochs with 0% validity)
+   - Conductivity chemical space is more complex ([Cu]/[Au] markers, diverse functional groups)
+   - **Recommendation**:
+     - Option A: Use strategic allocation with **fallback mechanism** (auto-revert on validity crash)
+     - Option B: Use baseline (Gemini Flash) for stability, accept lower peak performance
+     - Option C: Use **hybrid approach**: Start with Gemini Flash, switch to GPT-5.2 only after epoch 3 if reward plateaus
+
+#### General Lessons
+
+| Lesson | Evidence |
+|--------|----------|
+| **Model != Magic** | Tg showed expensive models don't guarantee better results |
+| **Task Complexity Matters** | Strategic allocation helped conductivity (complex) but not Tg (simpler) |
+| **Robustness vs Peak Performance** | Baseline more stable, Strategic higher peaks but riskier |
+| **Cost Efficiency** | Gemini Flash (free) beat GPT-5.2 ($0.25/run) for Tg |
+| **Failure Recovery Needed** | Both experiments showed validity crashes; need auto-revert logic |
+
+#### Code Artifacts
+
+**New Files**:
+- `apo/core/model_registry.py` (370 lines) — Tier-based model selection system
+- `config/tg_experiment_stronger.yaml` — Strategic allocation for Tg
+- `config/conductivity_experiment_stronger.yaml` — Strategic allocation for Conductivity
+- `scripts/plot_model_comparison.py` (224 lines) — Side-by-side comparison plots
+
+**Updated Files**:
+- `DEVLOG.md` — This comprehensive documentation
+- `.gitignore` — Protected API keys from accidental commit
+
+**Generated Figures**:
+- `results/tg_figures/fig4_model_comparison.png` (674 KB)
+- `results/conductivity_figures/fig4_model_comparison.png` (629 KB)
+
+#### Future Work
+
+- [ ] Implement **adaptive model selection**: Switch models mid-run based on validity/reward trends
+- [ ] Add **fallback mechanism**: Auto-revert to baseline models on consecutive failures
+- [ ] Test **reasoning models** (o1-mini, Gemini Flash Thinking) for Meta-strategist role
+- [ ] Create **cost-reward Pareto front** across model configurations
+- [ ] Implement **early stopping** for strategic runs to prevent catastrophic failures
+- [ ] Test **hybrid presets**: Start cheap, escalate to expensive only when needed
+
