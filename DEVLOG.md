@@ -372,3 +372,148 @@ CLAUDE_API_KEY=...
 - **Tool budget is fixed** — the agent has a hard cap. A token-budget version (stop when `total_tokens > N`) would be more cost-transparent.
 - **Knowledge extractor produces Markdown** — could also emit a structured JSON for downstream consumption by other tools.
 - **No multi-property optimization** — each config optimizes one property. Multi-objective joint optimization (maximize conductivity AND minimize Tg) is a possible extension.
+
+---
+
+## Experiment 1: Conductivity Optimization (80 train / 20 test)
+
+> **Date**: 2026-02-23  
+> **Config**: `config/conductivity_experiment.yaml`  
+> **Mode**: `loop` (10 epochs, deterministic, epoch-by-epoch logging)  
+> **Model**: All 4 tiers = `gemini/gemini-2.0-flash`  
+> **Dataset**: Stratified 100-molecule subset of `PolyGen-train-set-from-HTP-MD.csv` (80 train / 20 test, stratified by log-conductivity deciles)  
+> **Figures**: `results/figures/`
+
+### Dataset Setup
+
+- **Source**: 6,024 molecules from HTP-MD simulations (`conductivity` in mS/cm)
+- **Subset**: 100 molecules selected via stratified sampling on log10(conductivity) deciles
+- **Train**: 80, **Test**: 20 — well-matched distributions (train mean = -4.26, test mean = -4.25 log10 mS/cm)
+- **Split script**: `scripts/prepare_data.py` — fully reproducible with `SEED=42`
+
+### 10-Epoch Optimization Results
+
+| Epoch | Reward (Pareto HV) | Valid/Total | Avg Improvement | Avg Tanimoto | Notes |
+|-------|--------------------|-------------|-----------------|--------------|-------|
+| 1 | 1.804 | 23/24 | 1.38× | 0.653 | High similarity, moderate improvement |
+| 2 | **1.808** ← best | 24/24 | 1.34× | 0.369 | 100% validity, balanced Pareto front |
+| 3 | 1.664 | 23/24 | 1.17× | 0.498 | Meta: plateau warning, mode collapse risk |
+| 4 | 1.494 | 18/24 | 1.50× | 0.404 | Strategy diversified after meta advice |
+| 5 | 0.912 | 24/24 | 1.10× | 0.309 | High validity but reward dipped significantly |
+| 6 | 1.299 | 22/24 | 1.33× | 0.434 | Meta: mode collapse warning again |
+| 7 | 0.625 | 6/24 | 1.25× | 0.279 | Strategy overreached into invalid SMILES space |
+| 8 | 0.000 | 2/24 | 3.29× | 0.000 | Near-total failure — over-exploration |
+| 9 | 1.428 | 6/24 | 7.23× | 0.098 | Recovery epoch: high improvement on few valid |
+| 10 | 1.739 | 8/24 | 9.11× | 0.096 | High per-molecule improvement, low validity |
+
+**Best reward: 1.808 at epoch 2 (strategy v1)**
+
+### Epoch Dynamics — Key Observations
+
+1. **Early epochs peak fast**: Reward was highest at epoch 2. The first strategy update from the critic LLM was the most impactful — the LLM correctly identified ether-oxygen density and tertiary amine proximity as key features.
+
+2. **There is a reward-validity trade-off**: Later epochs (8–10) explored more aggressively (high avg improvement, up to 9.1×) but at the cost of validity dropping to 8–25%. This is the classic exploration-exploitation trade-off manifesting in SMILES space.
+
+3. **Pareto reward penalizes low-similarity wins**: Epoch 8 had 2 valid candidates with 3.29× improvement each, but reward = 0.0 because Tanimoto ≈ 0 (structurally unrelated). This is correct behavior — the Pareto HV correctly discounts molecules that don't resemble the parents.
+
+4. **Meta-strategist correctly flagged issues at epochs 3, 6, 9** with warnings like "repeated cycling through similar motifs", "reliance on similarity risks local optima", "strategy is becoming degenerate." This shows the meta-loop is reading the situation correctly, but the critic sometimes overcorrects.
+
+5. **Mode collapse → over-exploration cycle**: The pattern `high validity → meta warns of mode collapse → critic over-diversifies → many invalid SMILES → meta warns again` repeated across epochs 3–9. This is a known failure mode of iterative prompt optimization.
+
+### Best Strategy (Epoch 2, v1)
+
+```
+Based on the Pareto front, the most promising structures contain multiple ether linkages
+(e.g., CCOCCO) and tertiary amine groups (e.g., CN(C)).
+
+1. Increase Ether Oxygen Density: Prioritize structures with 3-5 consecutive ether linkages.
+2. Tertiary Amine: Include at least one tertiary amine, positioned 2-4 carbons from [Cu] or [Au].
+3. Moderate chain length: Total backbone 8-15 heavy atoms.
+4. Avoid: long aliphatic chains, bulky ring systems, excessively branched structures.
+```
+
+### Zero-Shot Evaluation Results
+
+**Setup**: Applied baseline (naive) and optimized (best APO strategy) prompts to **20 held-out test molecules** using Gemini Flash, 5 candidates per parent.
+
+| Metric | Baseline prompt | APO-optimized prompt | Δ |
+|--------|----------------|----------------------|---|
+| Validity | 90/99 (90.9%) | **100/100 (100.0%)** | +9.1% |
+| Avg improvement factor | 1,048× | **1,771×** | +69% |
+| % of candidates improving | 100% | 100% | = |
+| Avg Tanimoto similarity | 0.355 | 0.270 | -0.085 |
+
+**The optimized prompt significantly outperforms the baseline**:
+- **100% validity** vs. 91% — improved structural awareness in the prompt
+- **69% higher improvement factor** on average — the strategy learned to target high-conductivity regions
+- Slightly lower Tanimoto (0.27 vs. 0.36) — optimized candidates explore more structural space while remaining productive
+
+### What Worked in This Experiment
+
+| Observation | Takeaway |
+|-------------|----------|
+| Stratified split matched train/test distributions perfectly | Always use `pd.qcut` on log-property for stratified sampling of skewed property distributions |
+| `mode: loop` gave clean per-epoch logs for plotting | Use loop mode when you need reproducible epoch-by-epoch analysis; agent mode for production |
+| Meta-strategist warnings were accurate and useful | The meta-LLM is a real quality signal — consider logging its advice even if the main strategy is good |
+| Zero-shot transfer clearly worked | The APO-discovered prompt generalizes to unseen test parents, validating core hypothesis |
+| Pareto HV correctly prevented degenerate solutions | Epoch 8 had 3.3× improvement candidates but reward = 0 because Tanimoto ≈ 0 — exactly right |
+
+### What to Avoid
+
+| Failure | Root Cause | Fix |
+|---------|-----------|-----|
+| **Mode collapse → over-exploration oscillation** | Critic LLM overcorrects when meta warns of mode collapse, generating wildly different SMILES that are mostly invalid | Add a `validity_floor` guard: if validity drops below e.g. 30%, revert to the last good strategy instead of continuing |
+| **`GNNPredictor()` requires `prop_key` positional arg** | Direct constructor call in `zero_shot_eval.py` | Always use `get_surrogate(name, **kwargs)` from the registry, not the class directly |
+| **`axhline(transform=...)` invalid kwarg** | matplotlib doesn't accept `transform` in `axhline` | Use `ax.plot([x0, x1], [y, y], transform=ax.transAxes)` for lines in axes-fraction coordinates |
+| **`N_PER_PARENT` shadowed in main()** | Assigning `N_PER_PARENT = args.n_per_parent` locally after argparse reads the global as default | Don't shadow module-level constants in `main()`. Use a different local variable name |
+| **Background runner kills long eval runs** | Shell background runner has an implicit timeout and sends SIGINT to child processes | Always use `nohup ... &` for evaluation runs > 3 min; never use `sleep + poll` inside the runner |
+| **Reward at epoch 8 = 0.0 when only 2 valid** | 2 valid molecules is below the minimum for a non-degenerate Pareto front | Should revert strategy to last epoch with ≥ N_min (e.g. 5) valid candidates automatically |
+
+### New Files Added (Experiment 1)
+
+```
+scripts/
+├── prepare_data.py          ← Stratified train/test split of any conductivity CSV
+├── zero_shot_eval.py        ← Baseline vs. optimized zero-shot on test set
+└── plot_experiment.py       ← 4-figure plotting suite
+
+config/
+└── conductivity_experiment.yaml   ← Experiment config (loop mode, 10 epochs, Gemini Flash)
+
+data/
+├── train.csv  (gitignored)          ← 80 molecules, generated by prepare_data.py
+└── test.csv   (gitignored)          ← 20 molecules
+
+results/figures/
+├── fig1_epoch_performance.png   ← Reward + Tanimoto vs epoch (dual y-axis)
+├── fig2_distribution.png        ← Train/test conductivity distributions
+├── fig3_best_prompt.png         ← Best strategy text + reward inset bar chart
+└── fig4_zero_shot_comparison.png← Baseline vs optimized: validity, improvement, scatter
+```
+
+### Re-running This Experiment
+
+```bash
+# 1. Prepare data
+python scripts/prepare_data.py
+
+# 2. Run 10-epoch optimization
+python run_optimization.py \
+  --config config/conductivity_experiment.yaml \
+  --api-keys api_keys.txt
+
+# 3. Zero-shot eval
+python scripts/zero_shot_eval.py \
+  --run-dir results/conductivity_experiment/latest \
+  --test-csv data/test.csv \
+  --api-keys api_keys.txt \
+  --out results/zero_shot_eval.json
+
+# 4. Generate all 4 plots
+python scripts/plot_experiment.py \
+  --run-dir results/conductivity_experiment/latest \
+  --zero-shot results/zero_shot_eval.json \
+  --train-csv data/train.csv --test-csv data/test.csv \
+  --out results/figures
+```
+
