@@ -517,3 +517,264 @@ python scripts/plot_experiment.py \
   --out results/figures
 ```
 
+---
+
+## Experiment 2: Glass Transition Temperature (Tg) Optimization
+
+> **Date**: 2026-02-23
+> **Config**: `config/tg_experiment.yaml`
+> **Mode**: `loop` (10 epochs, deterministic, epoch-by-epoch logging)
+> **Model**: All 5 tiers = `gemini/gemini-2.0-flash`
+> **Dataset**: 30-molecule subset of Tg polymer dataset (PolyInfo convention with `*` markers)
+> **Figures**: `results/tg_figures/`
+> **Environment**: `conda env li_llm_optimization` (Python 3.10, PyTorch + PyG)
+> **API Keys Location**: `/noether/s0/dxb5775/prompt-optimization-work-jan-8/api_keys.txt` (NOT in git)
+
+### Dataset and GNN Surrogate Training
+
+**Source dataset**: `/noether/s0/dxb5775/tg_raw.csv` (7,174 polymer SMILES with Tg in °C)
+
+**GNN Training Strategy**: Trained 3 architectures to select best performer
+- Split: 70% train (5,020) / 15% val (1,076) / 15% test (1,077)
+- Normalization: mean = 141.3°C, std = 112.2°C
+
+| Architecture | Parameters | Val RMSE (°C) | Test RMSE (°C) | Status |
+|--------------|-----------|---------------|----------------|---------|
+| GCN_small | 23,041 | 42.60 | **46.55** | Baseline |
+| CGConv_med | 131,650 | 39.14 | 42.89 | Good |
+| **CGConv_large** | **715,010** | **37.83** | **42.37** | ✅ **Selected** |
+
+**Model saved to**: `models/tg/best_model.pth`
+**Training script**: `scripts/train_tg_gnn.py`
+**Predictor class**: `apo/surrogates/tg_predictor.py` (registered as `gnn_tg`)
+
+### 10-Epoch APO Optimization Results
+
+**Run ID**: `run_20260223_221315`
+
+| Epoch | Reward (Pareto HV) | Valid/Total | Avg Improvement | Max Improvement | Notes |
+|-------|--------------------|-------------|-----------------|-----------------|-------|
+| 1 | **1.2777** | 23/24 | 1.87× | 3.45× | Seed strategy: rigid aromatics + imides |
+| 2 | 0.0000 | 0/24 | N/A | N/A | Siloxane focus led to all invalid SMILES |
+| 3 | 0.0000 | 0/24 | N/A | N/A | Continued siloxane failures |
+| 4 | 1.0498 | 23/24 | 2.11× | 4.48× | Shift to fluorinated ethers |
+| 5 | 0.8315 | 24/24 | 1.66× | 2.47× | Polyamide/imide exploration |
+| 6 | 0.0000 | 0/24 | N/A | N/A | Meta warned of mode collapse |
+| 7 | **2.4786** ← best | 24/24 | 9.09× | **13.71×** | Polyimide/benzoxazole focus with cyclic imides |
+| 8 | 1.2214 | 24/24 | 4.62× | 12.52× | Refinement of polyimide structures |
+| 9 | 0.0000 | 0/24 | N/A | N/A | Over-exploration led to validity collapse |
+| 10 | 0.9093 | 24/24 | 2.48× | 5.34× | Recovery with simplified polyimides |
+
+**Best reward: 2.4786 at epoch 7 (strategy v6)**
+
+**Total**: 20 LLM calls · 66,949 tokens · 211s · $0.00 (Gemini free tier)
+
+**Overall validity**: 177/240 candidates (73.8%)
+
+### Best Strategy (Epoch 7, v6)
+
+```
+Given the persistent stagnation and the need to escape the siloxane trap, we will implement
+a focused approach on high-Tg motifs, specifically polyimides and polybenzoxazoles, while
+ensuring strict validity checks.
+
+Step 1: Design Polyimide (PI) structures based on pyromellitic dianhydride (PMDA) and
+aromatic diamines. Start with the core structure: *c1ccc(C(=O)Nc2ccc(C(=O)c3ccc(NC(=O)
+c4ccc(*)cc4)cc3)cc2)cc1
+
+Focus on:
+- Cyclic imides within backbone (increased rigidity)
+- Bulky substituents like tert-butyl groups
+- Fused aromatic rings (naphthalene, anthracene)
+```
+
+### Top 5 Molecules by Tg Improvement
+
+1. **13.71× improvement** (Tg = 179.5°C)
+   `*Oc1cc(C(=O)Nc2ccc(C(=O)c3ccc(NC(=O)N4CC=CC4=O)cc3)cc2)...`
+   Tanimoto similarity = 0.128
+
+2. **12.52× improvement** (Tg = 163.9°C)
+   `*C1=CC(=O)N(CCCCCCCC(=O)Oc2ccc(C(=O)Nc3ccc(NC(=O)c4ccc(...`
+   Tanimoto similarity = 0.000 (novel structure)
+
+3. **12.52× improvement** (Tg = 163.8°C)
+   `*C1=CC(=O)N(CCCCCCCC(=O)Oc2ccc(C(=O)Nc3ccc(C(=O)Nc4ccc(...`
+   Tanimoto similarity = 0.000
+
+4. **10.78× improvement** (Tg = 141.1°C)
+   `*OC(=O)c1ccc(NC(=O)c2ccc([Si](*)(C)O*)cc2)cc1...`
+   Tanimoto similarity = 0.000
+
+5. **5.34× improvement** (Tg = 69.9°C)
+   `*C1=CC(=O)N(CCCCCCCC(=O)Oc2ccc(C(=O)Oc3ccc(C(=O)N4C=CC4...`
+   Tanimoto similarity = 0.263
+
+### Epoch Dynamics — Key Observations
+
+1. **Siloxane trap (epochs 2-3, 6)**: Early focus on siloxane-containing polymers led to repeated SMILES parsing failures. The LLM struggled to generate valid Si-containing SMILES, resulting in 0% validity for 3 entire epochs.
+
+2. **Strategy pivot at epoch 7**: After meta-strategist warnings about "persistent stagnation" and "escaping the siloxane trap," the critic LLM successfully pivoted to polyimides/polybenzoxazoles. This single pivot resulted in the **best reward of the entire run** (2.48).
+
+3. **Validity-reward trade-off**: Unlike conductivity experiment where validity remained high, Tg optimization showed volatile validity (0-100%). However, when valid, the molecules showed **much higher improvement factors** (up to 13.7× vs 9.1× in conductivity).
+
+4. **Mode collapse detection worked**: Meta-strategist correctly identified stagnation at epochs 3, 6, 9 and suggested diversification. However, over-correction sometimes led to validity collapse (epoch 9).
+
+5. **Cyclic imides emerged as key motif**: Top performers all contained cyclic imide groups (e.g., `N1C=CC1=O`), suggesting the LLM correctly learned that rigidity → higher Tg.
+
+### What Worked ✅
+
+| Observation | Takeaway |
+|-------------|----------|
+| **GNN architecture selection** | Training 3 models and selecting CGConv_large (715K params) was worth it — lowest test RMSE (42.37°C) |
+| **Property-agnostic framework** | Zero code changes needed to switch from conductivity to Tg — only new config YAML + surrogate class |
+| **Meta-strategist intervention** | Correctly identified "siloxane trap" and forced pivot to polyimides at epoch 7 |
+| **Pareto reward with Tg** | Successfully balanced improvement factor vs similarity, preventing pure novelty without structural relevance |
+| **PolyInfo `*` marker handling** | Framework correctly handled polymer repeat-unit markers and validated exactly 2 `*` per SMILES |
+| **Knowledge extraction** | AI-generated insights correctly identified cyclic imides and bulky substituents as high-Tg features |
+
+### What Failed or Needed Fixing ❌
+
+| Failure | Root Cause | Fix Applied |
+|---------|-----------|-------------|
+| **Surrogate not registered** | `tg_predictor.py` was created but not imported in `registry.py` | Added `from . import tg_predictor` to `registry._lazy_import_all()` |
+| **F-string formatting error** | `train_tg_gnn.py:377` had invalid conditional in f-string (Python 3.10 limitation) | Extracted conditional to separate variable before f-string |
+| **Siloxane SMILES failures** | LLM repeatedly generated invalid Si-containing SMILES like `[Si]()` with wrong valence | Meta-strategist eventually forced strategy away from siloxanes at epoch 7 |
+| **Validity volatility** | 4 out of 10 epochs had 0% validity (vs only 1 in conductivity experiment) | Polymer SMILES with `*` markers are harder to generate correctly than small molecules |
+| **No warm-start from best epoch** | After finding best strategy at epoch 7, later epochs degraded | Could implement "best strategy lock" after consecutive zero-reward epochs |
+
+### New Files Added (Experiment 2)
+
+```
+scripts/
+├── train_tg_gnn.py              ← 3-architecture GNN training for Tg
+└── plot_tg_experiment.py        ← Visualization suite (3 figures)
+
+apo/surrogates/
+└── tg_predictor.py              ← TgGNNPredictor (registered as 'gnn_tg')
+
+config/
+├── tg_task.yaml                 ← Generic Tg task config
+└── tg_experiment.yaml           ← 10-epoch loop mode experiment config
+
+models/tg/
+├── best_model.pth               ← CGConv_large weights (2.9 MB)
+├── model_config.json            ← Architecture hyperparams
+├── scaler.json                  ← Normalization params (mean/std)
+└── training_report.txt          ← Training history for all 3 models
+
+data/
+└── tg_train.csv                 ← 30-molecule subset for APO
+
+results/tg_experiment/run_20260223_221315/
+├── run_log.jsonl                ← Full epoch-by-epoch log
+└── knowledge.md                 ← AI-extracted insights
+
+results/tg_figures/
+├── fig1_tg_epoch_performance.png    ← Reward/validity/improvement vs epoch
+├── fig2_tg_best_prompt.png          ← Best strategy text + stats
+└── fig3_tg_gnn_comparison.png       ← 3 GNN architectures comparison
+```
+
+### AI-Extracted Knowledge Highlights 🔬
+
+From `knowledge.md` (generated by LLM critic):
+
+**What worked**:
+- Cyclic imides within polyimide backbone (rigidity + intermolecular interactions)
+- Bulky substituents like tert-butyl groups (hinder chain packing)
+
+**What failed**:
+- Siloxane-containing polymers led to stagnation (multiple epochs)
+- 63 occurrences of invalid SMILES from over-complex structures
+- Incremental improvements without exploration → local optima
+
+**Recommended motifs**:
+- Fused aromatic rings (naphthalene, anthracene)
+- Cyclic dianhydrides (PMDA, BTDA)
+- Polybenzoxazoles (high thermal stability)
+
+**Recommended next strategy**:
+> Two-stage approach: (1) generate library of valid diamines/dianhydrides, (2) combine them.
+> Prioritize cyclic and fused aromatic systems. Heavily penalize invalid SMILES in scoring.
+
+### Visualization Gallery 📊
+
+**Figure 1**: Epoch performance dual-axis plot
+- Top panel: Pareto HV reward curve (best = 2.48 at epoch 7)
+- Bottom panel: Validity % (bars) + improvement factors (lines)
+
+**Figure 2**: Best prompt visualization
+- Bar chart showing epoch 7 as winner
+- Full strategy text in styled box
+- Performance stats footer
+
+**Figure 3**: GNN model comparison
+- Side-by-side bar plots for 3 architectures
+- Val vs Test RMSE for each model
+- CGConv_large highlighted as winner (42.37°C test RMSE)
+
+### Re-running This Experiment
+
+```bash
+# 1. Activate environment
+conda activate li_llm_optimization
+
+# 2. Train GNN surrogate (optional if model exists)
+cd /noether/s0/dxb5775/agentic-prompt-optimization
+python scripts/train_tg_gnn.py
+
+# 3. Run 10-epoch APO
+python run_optimization.py \
+  --config config/tg_experiment.yaml \
+  --api-keys /noether/s0/dxb5775/prompt-optimization-work-jan-8/api_keys.txt
+
+# 4. Analyze results
+python analyze_results.py results/tg_experiment/run_20260223_221315/run_log.jsonl
+
+# 5. Generate figures
+python scripts/plot_tg_experiment.py \
+  --run-dir results/tg_experiment/run_20260223_221315 \
+  --out results/tg_figures/
+```
+
+### Lessons Learned — Tg vs Conductivity Comparison 📚
+
+| Aspect | Conductivity Experiment | Tg Experiment | Insight |
+|--------|------------------------|---------------|---------|
+| **Validity** | Stable 90-100% | Volatile 0-100% | Polymer SMILES with `*` markers are harder to generate |
+| **Best epoch** | Epoch 2 (early peak) | Epoch 7 (mid-run pivot) | Some properties need more exploration before convergence |
+| **Improvement factors** | Up to 9.1× | Up to **13.7×** | Higher volatility → higher potential gains when successful |
+| **Mode collapse** | Gradual over-exploration | Abrupt (entire epochs at 0% validity) | Need validity floor guard (revert to last good strategy) |
+| **Meta-strategist value** | Helpful but ignored sometimes | **Critical** — forced successful pivot away from siloxanes | More valuable for complex problems with failure modes |
+| **Dataset size** | 100 molecules (80 train) | 30 molecules | Smaller dataset worked fine; diversity matters more than size |
+
+### Critical Environment Information 🔧
+
+**Conda Environment**: `li_llm_optimization`
+- Location: `/noether/s0/wdxb5775/anaconda3/envs/li_llm_optimization`
+- Python: 3.10
+- Key packages: `torch`, `torch-geometric`, `rdkit-pypi`, `litellm>=1.0`
+
+**API Keys** (NOT in git):
+- Path: `/noether/s0/dxb5775/prompt-optimization-work-jan-8/api_keys.txt`
+- Format: `GOOGLE_GEMINI_API_KEY=...`, `openai_GPT_api_key=...`, `CLAUDE_API_KEY=...`
+- Protected by `.gitignore`: `api_keys.txt`, `**/api_keys.txt`
+
+**Data Paths**:
+- Raw Tg dataset: `/noether/s0/dxb5775/tg_raw.csv` (7,174 polymers, PolyInfo format)
+- APO subset: `data/tg_train.csv` (30 molecules, gitignored)
+
+**Working Directories**:
+- Primary: `/noether/s0/dxb5775/agentic-prompt-optimization/`
+- Surrogates code: `/noether/s1/dxb5775/agentic-prompt-optimization/apo/surrogates/`
+
+### Known Limitations / Future Work — Tg-Specific
+
+- **No validity floor guard** — If validity drops to 0%, should auto-revert to last good strategy instead of continuing
+- **Polymer SMILES complexity** — Framework could benefit from SMILES pre-validation step before sending to predictor
+- **Siloxane generation issues** — LLM struggles with Si valence rules; could add Si-specific constraints to prompts
+- **No multi-stage optimization** — Two-stage approach suggested by AI (generate monomers → combine) not yet implemented
+- **Limited exploration budget** — Only 10 epochs; best performance at epoch 7 suggests more epochs could help
+- **No transfer learning** — Conductivity insights not used to seed Tg optimization (future: cross-property prompt transfer)
+

@@ -42,5 +42,6 @@ def list_surrogates() -> Dict[str, Type[SurrogatePredictor]]:
 def _lazy_import_all():
     """Import all surrogate modules so their @register decorators fire."""
     from . import gnn_predictor  # noqa: F401
+    from . import tg_predictor   # noqa: F401
 
 _lazy_import_all()
