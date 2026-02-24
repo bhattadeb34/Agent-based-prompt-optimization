@@ -1,13 +1,14 @@
 """
-Main optimization orchestrator — ties together all three loops.
+Main optimization engine — supports both:
+  1. AGENT mode:  LLM orchestrator with tool calling drives the loop
+  2. LOOP mode:   Classic fixed for-epoch loop (original behaviour, still useful)
 
-This is the core engine called by run_optimization.py.
+The mode is selected via config: `optimization.mode: agent` (default) or `loop`.
 """
 from __future__ import annotations
 
 import os
 import random
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -22,10 +23,14 @@ from .optimizer.inner_loop import InnerLoop
 from .optimizer.meta_loop import MetaLoop
 from .optimizer.outer_loop import OuterLoop
 from .surrogates.registry import get_surrogate
+from .task_context import TaskContext
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Data + key loading
+# ──────────────────────────────────────────────────────────────────────────────
 
 def load_dataset(cfg: Dict) -> List[str]:
-    """Load parent SMILES from CSV."""
     task = cfg["task"]
     data_path = task["dataset"]
     smiles_col = task.get("smiles_column", "mol_smiles")
@@ -33,23 +38,20 @@ def load_dataset(cfg: Dict) -> List[str]:
 
     df = pd.read_csv(data_path)
     if smiles_col not in df.columns:
-        raise ValueError(f"Column '{smiles_col}' not found in {data_path}. "
-                         f"Available: {list(df.columns)}")
-
-    # Drop NaN SMILES
+        raise ValueError(
+            f"Column '{smiles_col}' not found in {data_path}. "
+            f"Available: {list(df.columns)}"
+        )
     df = df.dropna(subset=[smiles_col])
-
     if sample_size and len(df) > sample_size:
         df = df.sample(n=sample_size, random_state=42)
-
     smiles_list = df[smiles_col].tolist()
     print(f"[APO] Loaded {len(smiles_list)} parent SMILES from {data_path}")
     return smiles_list
 
 
 def load_api_keys(keys_path: str) -> Dict[str, str]:
-    """Load API keys from a simple KEY='value' text file."""
-    keys = {}
+    keys: Dict[str, str] = {}
     if not os.path.exists(keys_path):
         print(f"[APO] Warning: API keys file not found at {keys_path}")
         return keys
@@ -63,7 +65,6 @@ def load_api_keys(keys_path: str) -> Dict[str, str]:
 
 
 def _normalise_api_keys(raw: Dict[str, str]) -> Dict[str, str]:
-    """Map raw key names to standard names expected by llm_client."""
     mapping = {
         "GOOGLE_GEMINI_API_KEY": "GOOGLE_API_KEY",
         "openai_GPT_api_key": "OPENAI_API_KEY",
@@ -72,153 +73,206 @@ def _normalise_api_keys(raw: Dict[str, str]) -> Dict[str, str]:
         "OPENAI_API_KEY": "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY",
     }
-    norm = {}
-    for k, v in raw.items():
-        std_key = mapping.get(k, k)
-        norm[std_key] = v
-    return norm
+    return {mapping.get(k, k): v for k, v in raw.items()}
 
 
-def run(cfg: Dict, api_keys_path: str = "api_keys.txt", resume_run_id: Optional[str] = None) -> str:
-    """
-    Run the full agentic prompt optimisation loop.
+# ──────────────────────────────────────────────────────────────────────────────
+# Component factory
+# ──────────────────────────────────────────────────────────────────────────────
 
-    Args:
-        cfg: Parsed YAML config dict.
-        api_keys_path: Path to api_keys.txt.
-        resume_run_id: Optional run ID to resume from (not yet implemented).
-
-    Returns:
-        Path to the run directory.
-    """
-    print("\n" + "=" * 70)
-    print("  AGENTIC PROMPT OPTIMISATION FRAMEWORK")
-    print("=" * 70)
-
-    # ── Load API keys ────────────────────────────────────────────────────────
-    raw_keys = load_api_keys(api_keys_path)
-    api_keys = _normalise_api_keys(raw_keys)
-    print(f"[APO] Loaded API keys: {[k for k, v in api_keys.items() if v]}")
-
-    # ── Config extraction ────────────────────────────────────────────────────
+def _build_components(cfg: Dict, api_keys: Dict[str, str], all_smiles: List[str]):
+    """Build all optimizer components from config."""
     task_cfg = cfg["task"]
     model_cfg = cfg["models"]
     opt_cfg = cfg["optimization"]
     temp_cfg = cfg.get("temperatures", {})
-    out_cfg = cfg.get("output", {})
 
-    property_name_key = task_cfg["property"]
+    # Surrogate
     surrogate_name = task_cfg["surrogate"]
     model_base_path = task_cfg.get("model_base_path", "")
-
-    worker_model = model_cfg["worker"]
-    critic_model = model_cfg["critic"]
-    meta_model = model_cfg["meta"]
-    knowledge_model = model_cfg.get("knowledge_extractor", meta_model)
-
-    n_epochs = opt_cfg["n_outer_epochs"]
-    n_per_mol = opt_cfg["n_per_molecule"]
-    batch_size = opt_cfg.get("batch_size", 4)
-    meta_interval = opt_cfg.get("meta_interval", 3)
-    reward_name = opt_cfg.get("reward_function", "pareto_hypervolume")
-    reward_kwargs = opt_cfg.get("reward_function_kwargs", {})
-    seed_strategy = opt_cfg.get("seed_strategy", "Generate polymer SMILES with higher target property.")
-
-    t_worker = temp_cfg.get("worker", 0.85)
-    t_critic = temp_cfg.get("critic", 0.2)
-    t_meta = temp_cfg.get("meta", 0.3)
-
-    # ── Initialise surrogate ─────────────────────────────────────────────────
-    print(f"\n[APO] Initialising surrogate: {surrogate_name}")
+    print(f"[APO] Loading surrogate: {surrogate_name}")
     surrogate = get_surrogate(surrogate_name, model_base_path=model_base_path)
-    property_name = surrogate.property_name
-    property_units = surrogate.property_units
-    print(f"[APO] Surrogate: {property_name} ({property_units})")
 
-    # ── Initialise reward ────────────────────────────────────────────────────
+    # Task context — ALL domain knowledge lives here
+    ctx = TaskContext.from_config(cfg, surrogate=surrogate)
+    print(f"[APO] Task: {ctx.property_name} ({ctx.property_units}) | "
+          f"molecule_type={ctx.molecule_type}")
+    if ctx.smiles_markers:
+        print(f"[APO] Required SMILES markers: {ctx.smiles_markers}")
+    else:
+        print(f"[APO] No SMILES markers required (generic mode)")
+
+    # Reward
+    reward_name = opt_cfg.get("reward_function", "pareto_hypervolume")
+    reward_kwargs = opt_cfg.get("reward_function_kwargs", {}) or {}
     reward_fn = get_reward_function(reward_name, **reward_kwargs)
-    print(f"[APO] Reward function: {reward_name}")
 
-    # ── Load dataset ─────────────────────────────────────────────────────────
-    all_smiles = load_dataset(cfg)
-
-    # ── Initialise logger ────────────────────────────────────────────────────
-    run_dir_base = out_cfg.get("run_dir", "./runs")
+    # Run logger
+    run_dir_base = cfg.get("output", {}).get("run_dir", "./runs")
     logger = RunLogger(run_dir_base)
     logger.save_config(cfg)
 
-    # ── Initialise prompt state history ──────────────────────────────────────
+    # History + seed state
     history = PromptStateHistory()
-    current_state = PromptState.seed(seed_strategy)
+    current_state = PromptState.seed(ctx.seed_strategy)
     history.add(current_state)
-    print(f"\n[APO] Seed strategy:\n  {seed_strategy[:200]}...")
 
-    # ── Initialise optimizer components ─────────────────────────────────────
+    # Loop components
     parent_cache: Dict[str, float] = {}
 
     inner = InnerLoop(
         surrogate=surrogate,
-        worker_model=worker_model,
+        task_context=ctx,
+        worker_model=model_cfg["worker"],
         api_keys=api_keys,
-        temperature=t_worker,
+        temperature=temp_cfg.get("worker", 0.85),
         parent_cache=parent_cache,
     )
 
     outer = OuterLoop(
         reward_fn=reward_fn,
-        critic_model=critic_model,
+        task_context=ctx,
+        critic_model=model_cfg["critic"],
         api_keys=api_keys,
-        temperature=t_critic,
-        property_name=property_name,
-        property_units=property_units,
+        temperature=temp_cfg.get("critic", 0.2),
     )
 
     meta = MetaLoop(
-        meta_model=meta_model,
+        task_context=ctx,
+        meta_model=model_cfg["meta"],
         api_keys=api_keys,
-        temperature=t_meta,
-        meta_interval=meta_interval,
-        property_name=property_name,
-        property_units=property_units,
+        temperature=temp_cfg.get("meta", 0.3),
+        meta_interval=opt_cfg.get("meta_interval", 3),
     )
+
+    return ctx, surrogate, reward_fn, logger, history, current_state, inner, outer, meta
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main entry point
+# ──────────────────────────────────────────────────────────────────────────────
+
+def run(cfg: Dict, api_keys_path: str = "api_keys.txt") -> str:
+    """
+    Run prompt optimization from config dict.
+
+    Mode is chosen by cfg['optimization']['mode']:
+      'agent'  — LLM orchestrator with tool calling (default, recommended)
+      'loop'   — classic fixed-epoch loop
+    """
+    print("\n" + "=" * 70)
+    print("  AGENTIC PROMPT OPTIMISATION FRAMEWORK")
+    print("=" * 70)
+
+    raw_keys = load_api_keys(api_keys_path)
+    api_keys = _normalise_api_keys(raw_keys)
+    print(f"[APO] API keys found: {[k for k, v in api_keys.items() if v]}")
+
+    all_smiles = load_dataset(cfg)
+
+    ctx, surrogate, reward_fn, logger, history, current_state, inner, outer, meta = \
+        _build_components(cfg, api_keys, all_smiles)
+
+    opt_cfg = cfg["optimization"]
+    mode = opt_cfg.get("mode", "agent")
+    model_cfg = cfg["models"]
+    out_cfg = cfg.get("output", {})
+
+    if mode == "agent":
+        run_dir = _run_agent_mode(
+            cfg=cfg, ctx=ctx, inner=inner, outer=outer, meta=meta,
+            logger=logger, history=history, current_state=current_state,
+            reward_fn=reward_fn, all_smiles=all_smiles,
+            model_cfg=model_cfg, api_keys=api_keys, opt_cfg=opt_cfg,
+        )
+    else:
+        run_dir = _run_loop_mode(
+            cfg=cfg, ctx=ctx, inner=inner, outer=outer, meta=meta,
+            logger=logger, history=history, current_state=current_state,
+            reward_fn=reward_fn, all_smiles=all_smiles,
+            opt_cfg=opt_cfg,
+        )
+
+    # Knowledge extraction
+    if out_cfg.get("extract_knowledge", True):
+        knowledge_model = model_cfg.get("knowledge_extractor", model_cfg.get("meta"))
+        print("\n[APO] Extracting knowledge...")
+        try:
+            extract_knowledge(
+                run_log_path=str(logger.log_path),
+                extractor_model=knowledge_model,
+                api_keys=api_keys,
+                task_context=ctx,
+            )
+        except Exception as e:
+            print(f"[APO] Warning: knowledge extraction failed: {e}")
+
+    return run_dir
+
+
+def _run_agent_mode(
+    cfg, ctx, inner, outer, meta, logger, history, current_state,
+    reward_fn, all_smiles, model_cfg, api_keys, opt_cfg,
+) -> str:
+    from .agent import OrchestratorAgent
+
+    # tool_budget = 2 tools per epoch × n_epochs (default) + some extra
+    n_epochs = opt_cfg.get("n_outer_epochs", 5)
+    tool_budget = opt_cfg.get("tool_budget", n_epochs * 3)
+    batch_size = opt_cfg.get("batch_size", 4)
+    orchestrator_model = model_cfg.get("orchestrator", model_cfg["meta"])
+
+    print(f"\n[APO] Mode: AGENT | Orchestrator: {orchestrator_model} | Budget: {tool_budget} tools")
+
+    agent = OrchestratorAgent(
+        inner=inner,
+        outer=outer,
+        meta=meta,
+        logger=logger,
+        history=history,
+        reward_fn=reward_fn,
+        task_context=ctx,
+        orchestrator_model=orchestrator_model,
+        api_keys=api_keys,
+        parent_smiles=all_smiles,
+        batch_size=batch_size,
+        tool_budget=tool_budget,
+    )
+    agent._current_state = current_state
+
+    run_dir = agent.run()
+    _print_summary(logger, history, agent.total_usage())
+    return run_dir
+
+
+def _run_loop_mode(
+    cfg, ctx, inner, outer, meta, logger, history, current_state,
+    reward_fn, all_smiles, opt_cfg,
+) -> str:
+    n_epochs = opt_cfg.get("n_outer_epochs", 10)
+    n_per_mol = opt_cfg.get("n_per_molecule", 3)
+    batch_size = opt_cfg.get("batch_size", 4)
+
+    print(f"\n[APO] Mode: LOOP | {n_epochs} epochs | {n_per_mol} candidates/parent")
 
     all_usages: List[LLMUsage] = []
     meta_advice = ""
 
-    # ── Main optimisation loop ───────────────────────────────────────────────
-    print(f"\n[APO] Starting {n_epochs} epoch optimisation loop...\n")
     for epoch in range(1, n_epochs + 1):
-        print(f"\n{'─' * 70}")
+        print(f"\n{'─'*65}")
         print(f"  EPOCH {epoch}/{n_epochs}  |  Strategy v{current_state.version}")
-        print(f"{'─' * 70}")
+        print(f"{'─'*65}")
 
-        # Sample a batch of parent SMILES
         batch = random.sample(all_smiles, min(batch_size, len(all_smiles)))
 
-        # 1. INNER LOOP — generate candidates
-        t0 = time.time()
-        candidates, inner_usages = inner.run(
-            strategy=current_state.strategy_text,
-            parent_smiles=batch,
-            n_per_molecule=n_per_mol,
-        )
-        inner_time = time.time() - t0
+        candidates, inner_usages = inner.run(current_state.strategy_text, batch, n_per_mol)
         all_usages.extend(inner_usages)
 
-        # 2. OUTER LOOP — compute reward, refine strategy
-        new_state, analysis, critic_usage = outer.refine(
-            candidates=candidates,
-            current_state=current_state,
-            history=history,
-            meta_advice=meta_advice,
-        )
+        new_state, analysis, critic_usage = outer.refine(candidates, current_state, history, meta_advice)
         all_usages.append(critic_usage)
 
         reward = current_state.score or 0.0
         pareto_data = reward_fn.pareto_data([c for c in candidates if c.get("valid")])
-
-        # 3. LOG epoch
-        epoch_usage = aggregate_usage(inner_usages + [critic_usage])
         logger.log_epoch(
             epoch=epoch,
             prompt_state_dict=current_state.to_dict(),
@@ -227,57 +281,33 @@ def run(cfg: Dict, api_keys_path: str = "api_keys.txt", resume_run_id: Optional[
             pareto_data=pareto_data,
             analysis=analysis,
             meta_advice=meta_advice,
-            llm_usage=epoch_usage,
+            llm_usage=aggregate_usage(inner_usages + [critic_usage]),
         )
 
-        # 4. META LOOP — periodic strategic guidance
-        meta_advice, meta_usage = meta.maybe_get_advice(
-            history=history,
-            reward_history=logger.reward_history,
-            analysis=analysis,
-        )
+        meta_advice, meta_usage = meta.maybe_get_advice(history, logger.reward_history, analysis)
         if meta_usage:
             all_usages.append(meta_usage)
-            if meta_advice:
-                print(f"\n[MetaAdvice] → {meta_advice[:200]}...")
 
-        # 5. Advance state
         history.add(new_state)
         current_state = new_state
 
-    # ── Save prompt history ──────────────────────────────────────────────────
     logger.save_prompt_history(history.to_list())
+    _print_summary(logger, history, aggregate_usage(all_usages))
+    return str(logger.run_dir)
 
-    # ── Print final summary ──────────────────────────────────────────────────
-    total_usage = aggregate_usage(all_usages)
-    print(f"\n{'=' * 70}")
+
+def _print_summary(logger, history, total_usage):
+    print(f"\n{'='*70}")
     print("  OPTIMISATION COMPLETE")
-    print(f"{'=' * 70}")
-    print(f"  Run directory : {logger.run_dir}")
-    print(f"  Epochs        : {n_epochs}")
+    print(f"{'='*70}")
+    print(f"  Run dir   : {logger.run_dir}")
     if history.best:
-        print(f"  Best reward   : {history.best.score:.4f} (v{history.best.version})")
-        print(f"  Best strategy :\n    {history.best.strategy_text[:300]}...")
-    print(f"\n  LLM Usage Summary:")
-    print(f"    Total calls   : {total_usage.get('total_calls', 0)}")
-    print(f"    Total tokens  : {total_usage.get('total_tokens', 0):,}")
-    print(f"    Total latency : {total_usage.get('total_latency_s', 0):.1f}s")
+        score_str = f"{history.best.score:.4f}" if history.best.score is not None else "N/A"
+        print(f"  Best score: {score_str} (v{history.best.version})")
+        print(f"  Best strat: {history.best.strategy_text[:250]}...")
+    print(f"\n  LLM Usage:")
+    print(f"    Calls   : {total_usage.get('total_calls', 0)}")
+    print(f"    Tokens  : {total_usage.get('total_tokens', 0):,}")
+    print(f"    Latency : {total_usage.get('total_latency_s', 0):.1f}s")
     for model, stats in total_usage.get("by_model", {}).items():
         print(f"    [{model}] {stats['calls']} calls, {stats['tokens']:,} tokens")
-
-    # ── Knowledge extraction ─────────────────────────────────────────────────
-    if out_cfg.get("extract_knowledge", True):
-        print(f"\n[APO] Extracting knowledge from run log...")
-        try:
-            knowledge_path = extract_knowledge(
-                run_log_path=str(logger.log_path),
-                extractor_model=knowledge_model,
-                api_keys=api_keys,
-                property_name=property_name,
-                property_units=property_units,
-            )
-            print(f"[APO] Knowledge saved to: {knowledge_path}")
-        except Exception as e:
-            print(f"[APO] Warning: knowledge extraction failed: {e}")
-
-    return str(logger.run_dir)

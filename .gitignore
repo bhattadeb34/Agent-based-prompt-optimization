@@ -1,0 +1,43 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# API keys — NEVER commit
+api_keys.txt
+api_keys*.txt
+*.key
+.env
+.env.*
+secrets/
+
+# Run outputs — can be large; export selectively
+runs/
+*.jsonl
+
+# Model weights
+*.pt
+*.pth
+*.ckpt
+
+# Data files
+*.csv
+data/
+
+# Logs
+*.log
+nohup.out
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store

@@ -1,0 +1,46 @@
+"""
+Generic SMILES property optimization — no structural markers required.
+Drop in any surrogate + SMILES dataset. Everything else is config-driven.
+"""
+task:
+  name: "Generic Property Optimization"
+  surrogate: my_custom_surrogate    # register with @register("my_custom_surrogate")
+  model_base_path: /path/to/model/weights
+  dataset: /path/to/smiles_dataset.csv
+  smiles_column: smiles
+  sample_size: 50
+
+  # No domain-specific markers needed
+  molecule_type: "organic compound"
+  domain_context: >
+    Generate structurally diverse organic molecules.
+    Use standard SMILES notation.
+    Focus on functional group exploration and scaffold hopping.
+  smiles_markers: []              # empty = no required tokens, just RDKit validity
+  similarity_on_repeat_unit: false
+
+models:
+  worker: gemini/gemini-2.0-flash
+  critic: gemini/gemini-2.0-flash
+  meta: gemini/gemini-2.0-flash
+  orchestrator: gemini/gemini-2.0-flash
+  knowledge_extractor: gemini/gemini-2.0-flash
+
+optimization:
+  mode: agent
+  n_outer_epochs: 5
+  tool_budget: 15
+  n_per_molecule: 3
+  batch_size: 4
+  reward_function: weighted_sum
+  reward_function_kwargs:
+    alpha: 0.7
+
+temperatures:
+  worker: 0.85
+  critic: 0.2
+  meta: 0.3
+
+output:
+  run_dir: ./runs
+  extract_knowledge: true

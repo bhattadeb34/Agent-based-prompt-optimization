@@ -173,6 +173,10 @@ def _inject_api_keys(api_keys: Dict[str, str]) -> None:
         os.environ["GOOGLE_API_KEY"] = api_keys["GOOGLE_API_KEY"]
 
 
+# Public alias used by agent.py
+_inject_env_keys = _inject_api_keys
+
+
 def aggregate_usage(usages: List[LLMUsage]) -> Dict:
     """Aggregate multiple LLMUsage objects into a summary dict."""
     if not usages:

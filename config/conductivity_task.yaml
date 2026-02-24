@@ -1,41 +1,46 @@
 task:
-  name: "Polymer Conductivity Maximisation"
-  property: conductivity
+  name: "Polymer Electrolyte Conductivity Maximisation"
   surrogate: gnn_conductivity
   model_base_path: /noether/s0/dxb5775/prompt-optimization-work-jan-8/htpmd/ml_models
   dataset: /noether/s0/dxb5775/prompt-optimization-work-jan-8/data/PolyGen-train-set-from-HTP-MD.csv
-  sample_size: 20            # how many parent SMILES to sample from dataset
-  smiles_column: mol_smiles  # column name in CSV
+  smiles_column: mol_smiles
+  sample_size: 20
+
+  # Domain knowledge — injected into all LLM prompts
+  molecule_type: "polymer electrolyte"
+  domain_context: >
+    [Cu] and [Au] are SYMBOLIC PLACEHOLDERS for polymer backbone connection points.
+    They are NOT actual copper or gold atoms.
+    Every generated SMILES MUST contain exactly one [Cu] and one [Au].
+    Key strategies: modify ether linkages, side chain flexibility, pendant polar groups.
+    Example valid SMILES:
+      CC(CO[Cu])CSCCOC(=O)[Au]
+      CC(CO[Cu])COCCOC(=O)[Au]
+      O=C([Au])NCCCCNC(=O)CCCN[Cu]
+  smiles_markers: ["[Cu]", "[Au]"]
+  similarity_on_repeat_unit: true
 
 models:
-  # Worker: generates SMILES — benefits from higher temperature / creativity
   worker: gemini/gemini-2.0-flash
-  # Critic: analyses results and writes strategy — needs focus, lower temp
   critic: openai/gpt-4o-mini
-  # Meta-strategist: high-level guidance every K epochs — smartest model
   meta: openai/gpt-4o
-  # Knowledge extractor: end-of-run analysis
+  orchestrator: openai/gpt-4o-mini   # drives the agent tool loop
   knowledge_extractor: openai/gpt-4o
 
 optimization:
-  n_outer_epochs: 10       # total number of critique / refine iterations
-  n_per_molecule: 3        # candidates to generate per parent SMILES
-  batch_size: 4            # parents per batch (LLM call)
-  meta_interval: 3         # run meta-strategist every N outer epochs
-  reward_function: pareto_hypervolume   # or: weighted_sum, property_only
-  # reward_function_kwargs:
-  #   alpha: 0.7            # for weighted_sum only
-  seed_strategy: >
-    Generate polymer SMILES with higher ionic conductivity than the parent.
-    Focus on structural similarity while exploring modifications to ether linkages,
-    chain flexibility, and ion coordination sites.
+  mode: agent                  # 'agent' (tool-calling orchestrator) or 'loop' (fixed epochs)
+  n_outer_epochs: 8            # used to set default tool budget in agent mode
+  tool_budget: 25              # total LLM tool calls the orchestrator can make
+  n_per_molecule: 3
+  batch_size: 4
+  meta_interval: 3             # for loop mode; agent decides itself
+  reward_function: pareto_hypervolume
 
 temperatures:
-  worker: 0.85             # high creativity for diverse SMILES generation
-  critic: 0.2              # focused analysis
-  meta: 0.3                # balanced strategic thinking
+  worker: 0.85
+  critic: 0.2
+  meta: 0.3
 
 output:
   run_dir: ./runs
-  extract_knowledge: true  # run knowledge extractor at end of run
-  log_invalid_smiles: true # include failed candidates in logs (for ASI)
+  extract_knowledge: true
