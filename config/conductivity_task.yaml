@@ -1,0 +1,41 @@
+task:
+  name: "Polymer Conductivity Maximisation"
+  property: conductivity
+  surrogate: gnn_conductivity
+  model_base_path: /noether/s0/dxb5775/prompt-optimization-work-jan-8/htpmd/ml_models
+  dataset: /noether/s0/dxb5775/prompt-optimization-work-jan-8/data/PolyGen-train-set-from-HTP-MD.csv
+  sample_size: 20            # how many parent SMILES to sample from dataset
+  smiles_column: mol_smiles  # column name in CSV
+
+models:
+  # Worker: generates SMILES — benefits from higher temperature / creativity
+  worker: gemini/gemini-2.0-flash
+  # Critic: analyses results and writes strategy — needs focus, lower temp
+  critic: openai/gpt-4o-mini
+  # Meta-strategist: high-level guidance every K epochs — smartest model
+  meta: openai/gpt-4o
+  # Knowledge extractor: end-of-run analysis
+  knowledge_extractor: openai/gpt-4o
+
+optimization:
+  n_outer_epochs: 10       # total number of critique / refine iterations
+  n_per_molecule: 3        # candidates to generate per parent SMILES
+  batch_size: 4            # parents per batch (LLM call)
+  meta_interval: 3         # run meta-strategist every N outer epochs
+  reward_function: pareto_hypervolume   # or: weighted_sum, property_only
+  # reward_function_kwargs:
+  #   alpha: 0.7            # for weighted_sum only
+  seed_strategy: >
+    Generate polymer SMILES with higher ionic conductivity than the parent.
+    Focus on structural similarity while exploring modifications to ether linkages,
+    chain flexibility, and ion coordination sites.
+
+temperatures:
+  worker: 0.85             # high creativity for diverse SMILES generation
+  critic: 0.2              # focused analysis
+  meta: 0.3                # balanced strategic thinking
+
+output:
+  run_dir: ./runs
+  extract_knowledge: true  # run knowledge extractor at end of run
+  log_invalid_smiles: true # include failed candidates in logs (for ASI)

@@ -1,0 +1,17 @@
+# Core ML/Chemistry
+rdkit>=2022.9.0
+torch>=2.0.0
+torch-geometric>=2.3.0
+numpy>=1.24.0
+pandas>=2.0.0
+
+# LLM gateway (model-agnostic — works with OpenAI, Gemini, Anthropic, etc.)
+litellm>=1.30.0
+
+# Config + utilities
+pyyaml>=6.0
+tqdm>=4.65.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
