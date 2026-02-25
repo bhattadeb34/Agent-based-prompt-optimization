@@ -1,0 +1,52 @@
+task:
+  name: "Conductivity Optimization - Agentic Workflow (Pilot)"
+  surrogate: gnn_conductivity
+  model_base_path: /noether/s0/dxb5775/prompt-optimization-work-jan-8/htpmd/ml_models
+  dataset: /noether/s0/dxb5775/agentic-prompt-optimization/data/train.csv
+  smiles_column: mol_smiles
+  sample_size: 30
+
+  molecule_type: "polymer electrolyte"
+  domain_context: >
+    [Cu] and [Au] are SYMBOLIC PLACEHOLDERS for polymer backbone connection points.
+    They are NOT actual copper or gold atoms — they mark where repeat units join.
+    Every generated SMILES MUST contain exactly one [Cu] and one [Au].
+    The goal is to maximise Li-ion conductivity by modifying the polymer architecture:
+    ether oxygen content, chain flexibility, polar side groups, and backbone connectivity.
+    Example valid SMILES:
+      CC(CO[Cu])CSCCOC(=O)[Au]
+      CC(CO[Cu])COCCOC(=O)[Au]
+      O=C([Au])NCCCCNC(=O)CCCN[Cu]
+  smiles_markers: ["[Cu]", "[Au]"]
+  similarity_on_repeat_unit: true
+
+models:
+  # Agentic mode: Use best models based on strategic allocation experiments
+  worker: gemini/gemini-2.0-flash      # FREE - Good for generation
+  critic: openai/gpt-4o                # BALANCED - Good for analysis & debate
+  meta: openai/gpt-4o                  # BALANCED - Good for strategic thinking
+
+optimization:
+  mode: agentic  # NEW: Use agentic workflow
+  n_outer_epochs: 5  # Shorter pilot run
+  n_per_molecule: 4
+  batch_size: 6
+  meta_interval: 3
+  reward_function: pareto_hypervolume
+  seed_strategy: >
+    Generate polymer SMILES that maximise Li-ion conductivity while
+    maintaining structural similarity to the parent.
+    Focus on: ether oxygen density, backbone flexibility, polar pendant groups.
+    Each SMILES must contain exactly one [Cu] and one [Au].
+
+  # Agentic-specific settings
+  max_retries_per_batch: 3  # Worker auto-retries invalid SMILES
+
+temperatures:
+  worker: 0.7   # Balanced creativity
+  critic: 0.3   # Focused analysis
+  meta: 0.4     # Strategic thinking
+
+output:
+  run_dir: ./results/conductivity_experiment_agentic
+  extract_knowledge: true
