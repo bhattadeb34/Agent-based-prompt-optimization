@@ -3,6 +3,7 @@ import pytest
 from typing import List, Optional
 from apo.surrogates.base import SurrogatePredictor
 from apo.surrogates.registry import get_surrogate, list_surrogates, register
+from apo.agents.tools import BatchPropertyPredictorTool, PropertyPredictorTool
 
 
 class MockSurrogate(SurrogatePredictor):
@@ -13,6 +14,18 @@ class MockSurrogate(SurrogatePredictor):
 
     def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
         return [1.0] * len(smiles_list)
+
+
+class StrictMockSurrogate(SurrogatePredictor):
+    """Mock that enforces the SurrogatePredictor batch API contract."""
+    property_name = "Strict Property"
+    property_units = "units"
+    maximize = True
+
+    def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
+        if isinstance(smiles_list, str):
+            raise TypeError("predict expects a list of SMILES, not a string")
+        return [float(len(smi)) for smi in smiles_list]
 
 
 class TestSurrogateBase:
@@ -32,6 +45,27 @@ class TestSurrogateBase:
         assert "property_name" in cfg
         assert "maximize" in cfg
         assert cfg["property_name"] == "Mock Property"
+
+
+class TestAgentPredictorTools:
+    def test_property_predictor_uses_single_smiles_api(self):
+        tool = PropertyPredictorTool(StrictMockSurrogate(), "Strict Property")
+
+        obs = tool.execute("CCO")
+
+        assert obs.success is True
+        assert obs.result["Strict Property"] == 3.0
+
+    def test_batch_property_predictor_uses_single_smiles_api_per_entry(self):
+        tool = BatchPropertyPredictorTool(StrictMockSurrogate(), "Strict Property")
+
+        obs = tool.execute(["C", "CCO"])
+
+        assert obs.success is True
+        assert obs.result == [
+            {"smiles": "C", "property": 1.0, "valid": True},
+            {"smiles": "CCO", "property": 3.0, "valid": True},
+        ]
 
 
 class TestRegistry:
