@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from apo.core.llm_client import LLMUsage
+from apo.agentic_engine import _merge_usage_summary
 from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import ParetoHypervolume
 from apo.logging.run_logger import RunLogger
@@ -172,6 +173,38 @@ class TestTaskContext:
         ctx = TaskContext(property_name="HOMO", property_units="eV",
                          maximize=False, molecule_type="organic compound")
         assert "minimise" in ctx.seed_strategy
+
+
+class TestAgenticUsageAccounting:
+    def test_merge_usage_summary_combines_agent_dicts(self):
+        total = {
+            "total_calls": 1,
+            "total_prompt_tokens": 10,
+            "total_completion_tokens": 5,
+            "total_tokens": 15,
+            "total_latency_s": 0.5,
+            "by_model": {"worker": {"calls": 1, "tokens": 15}},
+        }
+        addition = {
+            "total_calls": 2,
+            "total_prompt_tokens": 20,
+            "total_completion_tokens": 10,
+            "total_tokens": 30,
+            "total_latency_s": 1.0,
+            "by_model": {
+                "worker": {"calls": 1, "tokens": 10},
+                "critic": {"calls": 1, "tokens": 20},
+            },
+        }
+
+        merged = _merge_usage_summary(total, addition)
+
+        assert merged["total_calls"] == 3
+        assert merged["total_tokens"] == 45
+        assert merged["total_latency_s"] == 1.5
+        assert merged["avg_latency_s"] == 0.5
+        assert merged["by_model"]["worker"] == {"calls": 2, "tokens": 25}
+        assert merged["by_model"]["critic"] == {"calls": 1, "tokens": 20}
 
 
 class TestFullPipelineSmoke:
