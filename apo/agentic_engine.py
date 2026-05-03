@@ -11,18 +11,42 @@ LangGraph version will be added later for advanced conditional flows.
 """
 from __future__ import annotations
 
-import json
 import random
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .agents import WorkerAgent, CriticAgent, MetaAgent
-from .core.llm_client import LLMUsage, aggregate_usage
+from .core.llm_client import aggregate_usage
 from .core.prompt_state import PromptState, PromptStateHistory
 from .core.reward import get_reward_function
 from .logging.run_logger import RunLogger
 from .surrogates.registry import get_surrogate
 from .task_context import TaskContext
+
+
+def _merge_usage_summary(total: Dict[str, Any], addition: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge aggregated LLM usage dicts produced by different agents."""
+    if not addition:
+        return total
+
+    total["total_calls"] = total.get("total_calls", 0) + addition.get("total_calls", 0)
+    total["total_prompt_tokens"] = total.get("total_prompt_tokens", 0) + addition.get("total_prompt_tokens", 0)
+    total["total_completion_tokens"] = (
+        total.get("total_completion_tokens", 0) + addition.get("total_completion_tokens", 0)
+    )
+    total["total_tokens"] = total.get("total_tokens", 0) + addition.get("total_tokens", 0)
+    total["total_latency_s"] = round(
+        total.get("total_latency_s", 0.0) + addition.get("total_latency_s", 0.0), 3
+    )
+
+    total_by_model = total.setdefault("by_model", {})
+    for model, stats in addition.get("by_model", {}).items():
+        model_stats = total_by_model.setdefault(model, {"calls": 0, "tokens": 0})
+        model_stats["calls"] += stats.get("calls", 0)
+        model_stats["tokens"] += stats.get("tokens", 0)
+
+    calls = total.get("total_calls", 0)
+    total["avg_latency_s"] = round(total.get("total_latency_s", 0.0) / calls, 3) if calls else 0.0
+    return total
 
 
 def run_agentic_mode(
@@ -99,7 +123,7 @@ def run_agentic_mode(
     print(f"[APO Agentic] Config: {n_epochs} epochs, {n_per_mol} candidates/parent, batch={batch_size}")
     print(f"[APO Agentic] Models: Worker={model_cfg['worker']}, Critic={model_cfg['critic']}, Meta={model_cfg['meta']}")
 
-    all_usages: List[LLMUsage] = []
+    total_usage = aggregate_usage([])
     meta_advice = ""
 
     # Main optimization loop
@@ -117,7 +141,6 @@ def run_agentic_mode(
             parent_smiles=batch,
             n_per_molecule=n_per_mol,
         )
-        all_usages.extend(worker_usages)
 
         print(f"[Worker] Generated {len(candidates)} candidates, "
               f"{sum(1 for c in candidates if c.get('valid'))} valid")
@@ -129,7 +152,6 @@ def run_agentic_mode(
             history=history,
             meta_advice=meta_advice,
         )
-        all_usages.append(critic_usage)
 
         print(f"[Critic] Refined strategy to v{new_state.version}")
 
@@ -138,13 +160,9 @@ def run_agentic_mode(
         pareto_data = reward_fn.pareto_data([c for c in candidates if c.get("valid")])
 
         # Log epoch
-        # critic_usage is already aggregated dict, worker_usages are LLMUsage objects
-        all_usages_this_epoch = worker_usages.copy()
-        epoch_usage = aggregate_usage(all_usages_this_epoch)
-        # Manually merge critic_usage dict into epoch_usage
-        if critic_usage:
-            epoch_usage["total_calls"] = epoch_usage.get("total_calls", 0) + critic_usage.get("total_calls", 0)
-            epoch_usage["total_tokens"] = epoch_usage.get("total_tokens", 0) + critic_usage.get("total_tokens", 0)
+        epoch_usage = aggregate_usage(worker_usages)
+        _merge_usage_summary(epoch_usage, critic_usage)
+        _merge_usage_summary(total_usage, epoch_usage)
 
         logger.log_epoch(
             epoch=epoch,
@@ -164,10 +182,7 @@ def run_agentic_mode(
         # Meta agent: Get advice if needed
         if epoch % meta_interval == 0 or epoch == n_epochs:
             meta_advice, meta_usage = meta.get_advice(history, logger.reward_history)
-            # meta_usage is also a dict (aggregated), not LLMUsage object
-            if meta_usage and isinstance(meta_usage, dict):
-                # Can't append dict to list of LLMUsage, just track separately
-                pass
+            _merge_usage_summary(total_usage, meta_usage)
             if meta_advice:
                 print(f"[Meta] Advice: {meta_advice[:200]}...")
                 logger.save_agent_trace(f"meta_epoch_{epoch}", meta._interpretability_trace)
@@ -178,7 +193,6 @@ def run_agentic_mode(
 
     # Final summary
     logger.save_prompt_history(history.to_list())
-    total_usage = aggregate_usage(all_usages)
 
     print(f"\n{'='*70}")
     print("  AGENTIC OPTIMIZATION COMPLETE")
