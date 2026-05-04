@@ -11,6 +11,7 @@ import pytest
 from apo.core.llm_client import LLMUsage
 from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import ParetoHypervolume
+from apo.agentic_engine import run_agentic_mode
 from apo.logging.run_logger import RunLogger
 from apo.optimizer.inner_loop import InnerLoop
 from apo.optimizer.outer_loop import OuterLoop
@@ -243,3 +244,89 @@ class TestFullPipelineSmoke:
         # Process a plain SMILES child (no [Cu]/[Au]) — should be valid
         candidate = inner._process_candidate("CCO", "reason", "CC", 1.0)
         assert candidate["valid"] is True, f"Expected valid: {candidate}"
+
+    def test_agentic_mode_accepts_aggregated_agent_usage(self, tmp_run_dir):
+        """Critic/meta agents return usage dicts; final summary must not re-aggregate them."""
+
+        class FakeWorkerAgent:
+            def __init__(self, **kwargs):
+                self._interpretability_trace = {"agent": "worker"}
+
+            def generate(self, strategy, parent_smiles, n_per_molecule):
+                return (
+                    [{
+                        "parent_smiles": VALID_PARENT,
+                        "child_smiles": VALID_CHILD,
+                        "improvement_factor": 1.5,
+                        "similarity": 0.8,
+                        "valid": True,
+                        "child_property": 1.5,
+                        "parent_property": 1.0,
+                        "explanation": "test",
+                        "invalid_reason": "",
+                    }],
+                    [LLMUsage("worker-model", 10, 5, 0.1)],
+                )
+
+        class FakeCriticAgent:
+            def __init__(self, **kwargs):
+                self._interpretability_trace = {"agent": "critic"}
+
+            def refine(self, candidates, current_state, history, meta_advice=""):
+                new_state = PromptState(
+                    strategy_text="refined strategy",
+                    version=current_state.version + 1,
+                    score=0.5,
+                    rationale="test",
+                    parent_version=current_state.version,
+                )
+                usage = {
+                    "total_calls": 1,
+                    "total_prompt_tokens": 20,
+                    "total_completion_tokens": 10,
+                    "total_tokens": 30,
+                    "total_latency_s": 0.2,
+                    "avg_latency_s": 0.2,
+                    "by_model": {"critic-model": {"calls": 1, "tokens": 30}},
+                }
+                return new_state, {"analysis": "ok"}, usage
+
+        class FakeMetaAgent:
+            def __init__(self, **kwargs):
+                self._interpretability_trace = {"agent": "meta"}
+
+            def get_advice(self, history, reward_history):
+                usage = {
+                    "total_calls": 1,
+                    "total_prompt_tokens": 6,
+                    "total_completion_tokens": 4,
+                    "total_tokens": 10,
+                    "total_latency_s": 0.1,
+                    "avg_latency_s": 0.1,
+                    "by_model": {"meta-model": {"calls": 1, "tokens": 10}},
+                }
+                return "", usage
+
+        cfg = {
+            "models": {"worker": "worker-model", "critic": "critic-model", "meta": "meta-model"},
+            "optimization": {
+                "n_outer_epochs": 1,
+                "n_per_molecule": 1,
+                "batch_size": 1,
+                "meta_interval": 1,
+                "reward_function": "pareto_hypervolume",
+            },
+            "task": {"surrogate": "mock"},
+        }
+        logger = RunLogger(tmp_run_dir)
+
+        with patch("apo.agentic_engine.get_surrogate", return_value=MockSurrogate()), \
+             patch("apo.agentic_engine.WorkerAgent", FakeWorkerAgent), \
+             patch("apo.agentic_engine.CriticAgent", FakeCriticAgent), \
+             patch("apo.agentic_engine.MetaAgent", FakeMetaAgent):
+            run_agentic_mode(cfg, POLYMER_CTX, [VALID_PARENT], logger, api_keys={})
+
+        records = logger.load_existing_epochs()
+        assert len(records) == 1
+        assert records[0]["llm_usage"]["total_calls"] == 2
+        assert records[0]["llm_usage"]["total_tokens"] == 45
