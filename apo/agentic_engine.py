@@ -20,6 +20,7 @@ from .agents import WorkerAgent, CriticAgent, MetaAgent
 from .core.llm_client import aggregate_usage
 from .core.prompt_state import PromptState, PromptStateHistory
 from .core.reward import get_reward_function
+from .core.usage import merge_usage_summaries
 from .logging.run_logger import RunLogger
 from .surrogates.registry import get_surrogate
 from .task_context import TaskContext
@@ -118,7 +119,7 @@ def run_agentic_mode(
             n_per_molecule=n_per_mol,
         )
         worker_usage = aggregate_usage(worker_usages)
-        total_usage = _merge_usage_summaries(total_usage, worker_usage)
+        total_usage = merge_usage_summaries(total_usage, worker_usage)
 
         print(f"[Worker] Generated {len(candidates)} candidates, "
               f"{sum(1 for c in candidates if c.get('valid'))} valid")
@@ -130,7 +131,7 @@ def run_agentic_mode(
             history=history,
             meta_advice=meta_advice,
         )
-        total_usage = _merge_usage_summaries(total_usage, critic_usage)
+        total_usage = merge_usage_summaries(total_usage, critic_usage)
 
         print(f"[Critic] Refined strategy to v{new_state.version}")
 
@@ -141,7 +142,7 @@ def run_agentic_mode(
         # Log epoch
         # Critic usage is already aggregated; merge summaries instead of
         # passing dicts back through aggregate_usage, which expects LLMUsage.
-        epoch_usage = _merge_usage_summaries(worker_usage, critic_usage)
+        epoch_usage = merge_usage_summaries(worker_usage, critic_usage)
 
         logger.log_epoch(
             epoch=epoch,
@@ -161,7 +162,7 @@ def run_agentic_mode(
         # Meta agent: Get advice if needed
         if epoch % meta_interval == 0 or epoch == n_epochs:
             meta_advice, meta_usage = meta.get_advice(history, logger.reward_history)
-            total_usage = _merge_usage_summaries(total_usage, meta_usage)
+            total_usage = merge_usage_summaries(total_usage, meta_usage)
             if meta_advice:
                 print(f"[Meta] Advice: {meta_advice[:200]}...")
                 logger.save_agent_trace(f"meta_epoch_{epoch}", meta._interpretability_trace)
@@ -187,48 +188,3 @@ def run_agentic_mode(
         print(f"    [{model}] {stats['calls']} calls, {stats['tokens']:,} tokens")
 
     return str(logger.run_dir)
-
-
-def _merge_usage_summaries(base: Dict[str, Any], extra: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Merge aggregated LLM usage dictionaries without mutating inputs."""
-    merged: Dict[str, Any] = {
-        "total_calls": base.get("total_calls", 0),
-        "total_prompt_tokens": base.get("total_prompt_tokens", 0),
-        "total_completion_tokens": base.get("total_completion_tokens", 0),
-        "total_tokens": base.get("total_tokens", 0),
-        "total_latency_s": base.get("total_latency_s", 0.0),
-        "by_model": {
-            model: {"calls": stats.get("calls", 0), "tokens": stats.get("tokens", 0)}
-            for model, stats in base.get("by_model", {}).items()
-        },
-    }
-
-    if not extra:
-        merged["avg_latency_s"] = _average_latency(merged)
-        return merged
-
-    merged["total_calls"] += extra.get("total_calls", 0)
-    merged["total_prompt_tokens"] += extra.get("total_prompt_tokens", 0)
-    merged["total_completion_tokens"] += extra.get("total_completion_tokens", 0)
-    merged["total_tokens"] += extra.get("total_tokens", 0)
-    merged["total_latency_s"] = round(
-        merged["total_latency_s"] + extra.get("total_latency_s", 0.0),
-        3,
-    )
-
-    by_model = merged["by_model"]
-    for model, stats in extra.get("by_model", {}).items():
-        if model not in by_model:
-            by_model[model] = {"calls": 0, "tokens": 0}
-        by_model[model]["calls"] += stats.get("calls", 0)
-        by_model[model]["tokens"] += stats.get("tokens", 0)
-
-    merged["avg_latency_s"] = _average_latency(merged)
-    return merged
-
-
-def _average_latency(usage: Dict[str, Any]) -> float:
-    calls = usage.get("total_calls", 0)
-    if not calls:
-        return 0.0
-    return round(usage.get("total_latency_s", 0.0) / calls, 3)

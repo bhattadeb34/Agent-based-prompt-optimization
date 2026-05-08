@@ -8,10 +8,10 @@ from unittest.mock import patch
 
 import pytest
 
-from apo.agentic_engine import _merge_usage_summaries
 from apo.core.llm_client import LLMUsage
 from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import ParetoHypervolume
+from apo.core.usage import merge_usage_summaries
 from apo.logging.run_logger import RunLogger
 from apo.optimizer.inner_loop import InnerLoop
 from apo.optimizer.outer_loop import OuterLoop
@@ -170,7 +170,7 @@ class TestAgenticUsageAggregation:
             },
         }
 
-        merged = _merge_usage_summaries(base, extra)
+        merged = merge_usage_summaries(base, extra)
 
         assert merged["total_calls"] == 3
         assert merged["total_prompt_tokens"] == 125
