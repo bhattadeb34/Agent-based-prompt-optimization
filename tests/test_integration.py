@@ -12,6 +12,8 @@ from apo.core.llm_client import LLMUsage
 from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import ParetoHypervolume
 from apo.logging.run_logger import RunLogger
+from apo.agents.tools import BatchPropertyPredictorTool, PropertyPredictorTool
+from apo.agents.worker import WorkerAgent
 from apo.optimizer.inner_loop import InnerLoop
 from apo.optimizer.outer_loop import OuterLoop
 from apo.optimizer.meta_loop import MetaLoop
@@ -28,6 +30,23 @@ class MockSurrogate(SurrogatePredictor):
 
     def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
         return [1.0] * len(smiles_list)
+
+
+class StrictListSurrogate(SurrogatePredictor):
+    """Raises if callers violate the list-based SurrogatePredictor contract."""
+    property_name = "TestProp"
+    property_units = "units"
+    maximize = True
+
+    def __init__(self):
+        self.calls = []
+
+    def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
+        if isinstance(smiles_list, str):
+            raise TypeError("predict() expects a list of SMILES, not a string")
+        self.calls.append(list(smiles_list))
+        values = {"CC": 1.0, "CCC": 2.0, "CCO": 3.0}
+        return [values.get(s, 1.0) for s in smiles_list]
 
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
@@ -243,3 +262,40 @@ class TestFullPipelineSmoke:
         # Process a plain SMILES child (no [Cu]/[Au]) — should be valid
         candidate = inner._process_candidate("CCO", "reason", "CC", 1.0)
         assert candidate["valid"] is True, f"Expected valid: {candidate}"
+
+
+class TestAgenticSurrogateUsage:
+    def test_agentic_property_tools_use_single_prediction_wrapper(self):
+        surrogate = StrictListSurrogate()
+
+        single = PropertyPredictorTool(surrogate, "TestProp").execute("CC")
+        batch = BatchPropertyPredictorTool(surrogate, "TestProp").execute(["CC", "CCC"])
+
+        assert single.success is True
+        assert single.result["TestProp"] == 1.0
+        assert batch.success is True
+        assert [r["property"] for r in batch.result] == [1.0, 2.0]
+        assert surrogate.calls == [["CC"], ["CC"], ["CCC"]]
+
+    def test_agentic_worker_validation_uses_single_prediction_wrapper(self):
+        surrogate = StrictListSurrogate()
+        worker = WorkerAgent(
+            model="gemini/gemini-2.0-flash",
+            api_keys={},
+            task_context=GENERIC_CTX,
+            surrogate=surrogate,
+            parent_cache={},
+        )
+
+        candidates = worker._validate_candidates([{
+            "parent_smiles": "CC",
+            "child_smiles": "CCC",
+            "explanation": "extend chain",
+        }])
+
+        assert len(candidates) == 1
+        assert candidates[0]["valid"] is True
+        assert candidates[0]["parent_property"] == 1.0
+        assert candidates[0]["child_property"] == 2.0
+        assert candidates[0]["improvement_factor"] == 2.0
+        assert surrogate.calls == [["CC"], ["CCC"]]
