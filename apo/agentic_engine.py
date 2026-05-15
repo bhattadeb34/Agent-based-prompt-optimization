@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .agents import WorkerAgent, CriticAgent, MetaAgent
-from .core.llm_client import LLMUsage, aggregate_usage
+from .core.llm_client import aggregate_usage
 from .core.prompt_state import PromptState, PromptStateHistory
 from .core.reward import get_reward_function
 from .logging.run_logger import RunLogger
@@ -99,7 +99,7 @@ def run_agentic_mode(
     print(f"[APO Agentic] Config: {n_epochs} epochs, {n_per_mol} candidates/parent, batch={batch_size}")
     print(f"[APO Agentic] Models: Worker={model_cfg['worker']}, Critic={model_cfg['critic']}, Meta={model_cfg['meta']}")
 
-    all_usages: List[LLMUsage] = []
+    all_usages: List[Any] = []
     meta_advice = ""
 
     # Main optimization loop
@@ -133,22 +133,17 @@ def run_agentic_mode(
 
         print(f"[Critic] Refined strategy to v{new_state.version}")
 
-        # Calculate reward
-        reward = new_state.score or 0.0
+        # CriticAgent scores the strategy that generated this epoch's candidates.
+        reward = current_state.score or 0.0
         pareto_data = reward_fn.pareto_data([c for c in candidates if c.get("valid")])
 
         # Log epoch
-        # critic_usage is already aggregated dict, worker_usages are LLMUsage objects
-        all_usages_this_epoch = worker_usages.copy()
-        epoch_usage = aggregate_usage(all_usages_this_epoch)
-        # Manually merge critic_usage dict into epoch_usage
-        if critic_usage:
-            epoch_usage["total_calls"] = epoch_usage.get("total_calls", 0) + critic_usage.get("total_calls", 0)
-            epoch_usage["total_tokens"] = epoch_usage.get("total_tokens", 0) + critic_usage.get("total_tokens", 0)
+        # critic_usage is already aggregated; aggregate_usage handles both shapes.
+        epoch_usage = aggregate_usage(worker_usages + ([critic_usage] if critic_usage else []))
 
         logger.log_epoch(
             epoch=epoch,
-            prompt_state_dict=new_state.to_dict(),
+            prompt_state_dict=current_state.to_dict(),
             candidates=candidates,
             reward=reward,
             pareto_data=pareto_data,
@@ -164,10 +159,8 @@ def run_agentic_mode(
         # Meta agent: Get advice if needed
         if epoch % meta_interval == 0 or epoch == n_epochs:
             meta_advice, meta_usage = meta.get_advice(history, logger.reward_history)
-            # meta_usage is also a dict (aggregated), not LLMUsage object
             if meta_usage and isinstance(meta_usage, dict):
-                # Can't append dict to list of LLMUsage, just track separately
-                pass
+                all_usages.append(meta_usage)
             if meta_advice:
                 print(f"[Meta] Advice: {meta_advice[:200]}...")
                 logger.save_agent_trace(f"meta_epoch_{epoch}", meta._interpretability_trace)
