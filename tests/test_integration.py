@@ -2,6 +2,9 @@
 Integration smoke tests — updated for TaskContext-based API.
 """
 import json
+import importlib
+import sys
+import types
 from pathlib import Path
 from typing import List, Optional
 from unittest.mock import patch
@@ -11,7 +14,6 @@ import pytest
 from apo.core.llm_client import LLMUsage
 from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import ParetoHypervolume
-from apo.agentic_engine import run_agentic_mode
 from apo.agents.meta import MetaAgent
 from apo.agents.tools import BatchPropertyPredictorTool, PropertyPredictorTool
 from apo.agents.worker import WorkerAgent
@@ -232,10 +234,14 @@ class TestAgenticWorkflowRegressions:
                 "by_model": {"critic": {"calls": 1, "tokens": 2}},
             }
 
-        monkeypatch.setattr("apo.agentic_engine.get_surrogate", lambda *args, **kwargs: MockSurrogate())
-        monkeypatch.setattr("apo.agentic_engine.WorkerAgent.generate", fake_generate)
-        monkeypatch.setattr("apo.agentic_engine.CriticAgent.refine", fake_refine)
-        monkeypatch.setattr("apo.agentic_engine.MetaAgent.get_advice", lambda self, history, rewards: ("", None))
+        registry_stub = types.ModuleType("apo.surrogates.registry")
+        registry_stub.get_surrogate = lambda *args, **kwargs: MockSurrogate()
+        monkeypatch.setitem(sys.modules, "apo.surrogates.registry", registry_stub)
+        agentic_engine = importlib.import_module("apo.agentic_engine")
+
+        monkeypatch.setattr(agentic_engine.WorkerAgent, "generate", fake_generate)
+        monkeypatch.setattr(agentic_engine.CriticAgent, "refine", fake_refine)
+        monkeypatch.setattr(agentic_engine.MetaAgent, "get_advice", lambda self, history, rewards: ("", None))
 
         cfg = {
             "task": {"surrogate": "mock", "model_base_path": ""},
@@ -250,7 +256,7 @@ class TestAgenticWorkflowRegressions:
         }
         logger = RunLogger(tmp_run_dir)
 
-        run_agentic_mode(cfg, GENERIC_CTX, ["CC"], logger, api_keys={})
+        agentic_engine.run_agentic_mode(cfg, GENERIC_CTX, ["CC"], logger, api_keys={})
 
         records = logger.load_existing_epochs()
         assert len(records) == 1
