@@ -17,12 +17,30 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .agents import WorkerAgent, CriticAgent, MetaAgent
-from .core.llm_client import LLMUsage, aggregate_usage
+from .core.llm_client import aggregate_usage
 from .core.prompt_state import PromptState, PromptStateHistory
 from .core.reward import get_reward_function
 from .logging.run_logger import RunLogger
 from .surrogates.registry import get_surrogate
 from .task_context import TaskContext
+
+
+def _merge_usage_dicts(total: Dict[str, Any], usage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge aggregate_usage-style dictionaries without assuming raw LLMUsage objects."""
+    if not usage:
+        return total
+
+    for key in ("total_calls", "total_prompt_tokens", "total_completion_tokens", "total_tokens"):
+        total[key] = total.get(key, 0) + usage.get(key, 0)
+    total["total_latency_s"] = round(total.get("total_latency_s", 0.0) + usage.get("total_latency_s", 0.0), 3)
+
+    by_model = total.setdefault("by_model", {})
+    for model, stats in usage.get("by_model", {}).items():
+        current = by_model.setdefault(model, {"calls": 0, "tokens": 0})
+        current["calls"] += stats.get("calls", 0)
+        current["tokens"] += stats.get("tokens", 0)
+
+    return total
 
 
 def run_agentic_mode(
