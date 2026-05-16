@@ -2,6 +2,9 @@
 Integration smoke tests — updated for TaskContext-based API.
 """
 import json
+import importlib
+import sys
+import types
 from pathlib import Path
 from typing import List, Optional
 from unittest.mock import patch
@@ -11,6 +14,9 @@ import pytest
 from apo.core.llm_client import LLMUsage
 from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import ParetoHypervolume
+from apo.agents.meta import MetaAgent
+from apo.agents.tools import BatchPropertyPredictorTool, PropertyPredictorTool
+from apo.agents.worker import WorkerAgent
 from apo.logging.run_logger import RunLogger
 from apo.optimizer.inner_loop import InnerLoop
 from apo.optimizer.outer_loop import OuterLoop
@@ -28,6 +34,17 @@ class MockSurrogate(SurrogatePredictor):
 
     def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
         return [1.0] * len(smiles_list)
+
+
+class StrictBatchSurrogate(SurrogatePredictor):
+    property_name = "StrictProp"
+    property_units = "units"
+    maximize = True
+
+    def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
+        if isinstance(smiles_list, str):
+            raise TypeError("predict expects a list of SMILES, not a string")
+        return [float(len(smi)) for smi in smiles_list]
 
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
@@ -141,6 +158,112 @@ class TestPromptStateHistory:
         for i in range(5):
             h.add(PromptState(strategy_text=f"v{i}", version=i, rationale=""))
         assert len(h.strategy_timeline()) == 5
+
+
+class TestAgenticWorkflowRegressions:
+    def test_worker_and_tools_use_single_prediction_wrapper(self):
+        surrogate = StrictBatchSurrogate()
+
+        single = PropertyPredictorTool(surrogate, "StrictProp").execute("CCO")
+        assert single.success is True
+        assert single.result["StrictProp"] == 3.0
+
+        batch = BatchPropertyPredictorTool(surrogate, "StrictProp").execute(["CC", "CCO"])
+        assert batch.success is True
+        assert [r["property"] for r in batch.result] == [2.0, 3.0]
+
+        worker = WorkerAgent(
+            model="test-model",
+            api_keys={},
+            task_context=GENERIC_CTX,
+            surrogate=surrogate,
+            parent_cache={},
+        )
+        candidates = worker._validate_candidates([{
+            "parent_smiles": "CC",
+            "child_smiles": "CCO",
+            "explanation": "add oxygen",
+        }])
+        assert candidates[0]["valid"] is True
+        assert candidates[0]["parent_property"] == 2.0
+        assert candidates[0]["child_property"] == 3.0
+        assert candidates[0]["improvement_factor"] == 1.5
+
+    def test_meta_formats_recent_prompt_states(self):
+        history = PromptStateHistory()
+        for i in range(4):
+            history.add(PromptState(strategy_text=f"strategy {i}", version=i, rationale=""))
+
+        meta = MetaAgent(
+            model="test-model",
+            api_keys={},
+            task_context=GENERIC_CTX,
+        )
+        meta.history = history
+
+        formatted = meta._format_recent_strategies()
+        assert "v1: strategy 1" in formatted
+        assert "v3: strategy 3" in formatted
+
+    def test_agentic_run_logs_computed_reward_and_finishes(self, tmp_run_dir, monkeypatch):
+        def fake_generate(self, strategy, parent_smiles, n_per_molecule):
+            self._interpretability_trace = {"trace": "worker"}
+            return ([{
+                "parent_smiles": "CC",
+                "child_smiles": "CCO",
+                "valid": True,
+                "parent_property": 1.0,
+                "child_property": 2.0,
+                "improvement_factor": 2.0,
+                "similarity": 0.5,
+                "explanation": "add oxygen",
+            }], [MOCK_USAGE])
+
+        def fake_refine(self, candidates, current_state, history, meta_advice=""):
+            self._interpretability_trace = {"trace": "critic"}
+            new_state = PromptState(
+                strategy_text="next strategy",
+                version=current_state.version + 1,
+                rationale="test",
+                parent_version=current_state.version,
+            )
+            return new_state, {"analysis": "ok"}, {
+                "total_calls": 1,
+                "total_prompt_tokens": 1,
+                "total_completion_tokens": 1,
+                "total_tokens": 2,
+                "total_latency_s": 0.1,
+                "by_model": {"critic": {"calls": 1, "tokens": 2}},
+            }
+
+        registry_stub = types.ModuleType("apo.surrogates.registry")
+        registry_stub.get_surrogate = lambda *args, **kwargs: MockSurrogate()
+        monkeypatch.setitem(sys.modules, "apo.surrogates.registry", registry_stub)
+        agentic_engine = importlib.import_module("apo.agentic_engine")
+
+        monkeypatch.setattr(agentic_engine.WorkerAgent, "generate", fake_generate)
+        monkeypatch.setattr(agentic_engine.CriticAgent, "refine", fake_refine)
+        monkeypatch.setattr(agentic_engine.MetaAgent, "get_advice", lambda self, history, rewards: ("", None))
+
+        cfg = {
+            "task": {"surrogate": "mock", "model_base_path": ""},
+            "models": {"worker": "worker", "critic": "critic", "meta": "meta"},
+            "optimization": {
+                "n_outer_epochs": 1,
+                "n_per_molecule": 1,
+                "batch_size": 1,
+                "meta_interval": 10,
+                "reward_function": "pareto_hypervolume",
+            },
+        }
+        logger = RunLogger(tmp_run_dir)
+
+        agentic_engine.run_agentic_mode(cfg, GENERIC_CTX, ["CC"], logger, api_keys={})
+
+        records = logger.load_existing_epochs()
+        assert len(records) == 1
+        assert records[0]["reward"] == 1.0
+        assert records[0]["prompt_state"]["score"] == 1.0
 
 
 class TestTaskContext:
