@@ -207,6 +207,7 @@ class TestAgenticWorkflowRegressions:
 
     def test_agentic_run_logs_computed_reward_and_finishes(self, tmp_run_dir, monkeypatch):
         def fake_generate(self, strategy, parent_smiles, n_per_molecule):
+            self._interpretability_trace = {"trace": "worker"}
             return ([{
                 "parent_smiles": "CC",
                 "child_smiles": "CCO",
@@ -219,6 +220,7 @@ class TestAgenticWorkflowRegressions:
             }], [MOCK_USAGE])
 
         def fake_refine(self, candidates, current_state, history, meta_advice=""):
+            self._interpretability_trace = {"trace": "critic"}
             new_state = PromptState(
                 strategy_text="next strategy",
                 version=current_state.version + 1,
