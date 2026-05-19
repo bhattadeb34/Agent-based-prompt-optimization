@@ -436,7 +436,7 @@ Return JSON (ONLY JSON, no other text):
 
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
                 except:
                     self.parent_cache[parent_smiles] = None
 
@@ -444,8 +444,12 @@ Return JSON (ONLY JSON, no other text):
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
-                    if cand["child_property"] and cand["parent_property"]:
+                    cand["child_property"] = self.surrogate.predict_single(child_smiles)
+                    if (
+                        cand["child_property"] is not None
+                        and cand["parent_property"] is not None
+                        and abs(cand["parent_property"]) > 1e-15
+                    ):
                         cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
                     else:
                         cand["improvement_factor"] = 0.0
