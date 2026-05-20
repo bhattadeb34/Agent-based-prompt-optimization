@@ -236,8 +236,10 @@ class TgGNNPredictor(SurrogatePredictor):
         model.eval()
         self._model = model
         self._device = device
+        val_rmse = cfg.get("val_rmse_c")
+        val_rmse_text = f"{val_rmse:.1f}" if isinstance(val_rmse, (int, float)) else "?"
         print(f"[TgGNNPredictor] Loaded {cfg.get('architecture','?')} "
-              f"(val RMSE {cfg.get('val_rmse_c', '?'):.1f} °C) from {self._model_path}")
+              f"(val RMSE {val_rmse_text} °C) from {self._model_path}")
 
     def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
         if not smiles_list:
