@@ -253,7 +253,7 @@ META ADVICE:
         current_state: PromptState,
         history: PromptStateHistory,
         meta_advice: str = "",
-    ) -> Tuple[PromptState, Dict, LLMUsage]:
+    ) -> Tuple[PromptState, Dict, Dict]:
         """
         Main entry point: Refine strategy based on results.
 
@@ -275,6 +275,21 @@ META ADVICE:
 
         # Run ReAct loop
         result, steps = self.run(initial_state="")
+
+        if self.new_state is None:
+            self.new_state = PromptState(
+                strategy_text=current_state.strategy_text,
+                version=current_state.version + 1,
+                rationale="Fallback (critic did not produce a strategy)",
+                parent_version=current_state.version,
+                model_used=self.model,
+            )
+
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = self.reward_fn.compute(valid_candidates)
+        self.new_state.score = reward
+        self.new_state.metadata["n_valid_candidates"] = len(valid_candidates)
+        self.new_state.metadata["n_total_candidates"] = len(candidates)
 
         # Save interpretability trace
         self._save_trace_to_disk()
@@ -433,7 +448,7 @@ Return JSON:
             })
 
             # Now run debate to select best
-            selected = self._run_debate(alternatives)
+            selected = self._normalise_alternative(self._run_debate(alternatives))
 
             # Create new state
             self.new_state = PromptState(
@@ -462,7 +477,11 @@ Return JSON:
 
     def _run_debate(self, alternatives: Dict) -> Dict:
         """Run debate between top 2 alternatives."""
-        alt_list = [v for k, v in alternatives.items() if isinstance(v, dict)]
+        alt_list = [
+            self._normalise_alternative(v)
+            for v in alternatives.values()
+            if isinstance(v, dict) and v.get("strategy")
+        ]
         if len(alt_list) < 2:
             # Not enough alternatives, return first
             return alt_list[0] if alt_list else {"strategy": "fallback", "rationale": "no alternatives", "name": "fallback"}
@@ -515,6 +534,15 @@ Return JSON:
             }
 
         return selected
+
+    def _normalise_alternative(self, alternative: Dict) -> Dict:
+        """Ensure malformed LLM alternatives cannot crash strategy creation."""
+        return {
+            "name": alternative.get("name", "Alternative"),
+            "strategy": alternative.get("strategy") or self.current_state.strategy_text,
+            "rationale": alternative.get("rationale", "No rationale provided"),
+            "confidence": alternative.get("confidence", 0.8),
+        }
 
     def _save_trace_to_disk(self):
         """Save full interpretability trace."""
