@@ -207,7 +207,7 @@ ANALYSIS SO FAR:
         if not self.history:
             return "No history"
 
-        recent = self.history.all()[-3:]
+        recent = self.history.all_states[-3:]
         lines = []
         for state in recent:
             lines.append(f"v{state.version}: {state.strategy_text[:100]}...")
