@@ -28,6 +28,7 @@ from .tools import (
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
+from ..utils.smiles_utils import validate_smiles
 
 
 class WorkerAgent(ReActAgent):
@@ -47,7 +48,7 @@ class WorkerAgent(ReActAgent):
         api_keys: Dict[str, str],
         task_context: TaskContext,
         surrogate,
-        parent_cache: Dict[str, float],
+        parent_cache: Dict[str, Optional[float]],
         temperature: float = 0.7,
         max_retries_per_batch: int = 3,
     ):
@@ -434,18 +435,27 @@ Return JSON (ONLY JSON, no other text):
             parent_smiles = cand["parent_smiles"]
             child_smiles = cand["child_smiles"]
 
+            if cand["valid"]:
+                marker_valid, marker_reason = validate_smiles(
+                    child_smiles,
+                    required_markers=self.ctx.smiles_markers,
+                )
+                if not marker_valid:
+                    cand["valid"] = False
+                    cand["invalid_reason"] = marker_reason
+
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
-                except:
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
+                except Exception:
                     self.parent_cache[parent_smiles] = None
 
             cand["parent_property"] = self.parent_cache.get(parent_smiles)
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
-                    if cand["child_property"] and cand["parent_property"]:
+                    cand["child_property"] = self.surrogate.predict_single(child_smiles)
+                    if cand["child_property"] is not None and cand["parent_property"]:
                         cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
                     else:
                         cand["improvement_factor"] = 0.0
