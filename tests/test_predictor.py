@@ -77,3 +77,15 @@ class TestGNNPredictor:
         pred = GNNPredictor("conductivity", model_base_path="/tmp/nonexistent")
         result = pred.predict(["CC(CO[Cu])CSCCOC(=O)[Au]"])
         assert result == [None]
+
+
+class TestTgGNNPredictor:
+    def test_predict_missing_artifacts_returns_none(self, tmp_path):
+        """Missing Tg training artifacts should not crash optimization loops."""
+        from apo.surrogates.tg_predictor import TgGNNPredictor
+        pred = TgGNNPredictor(
+            model_path=str(tmp_path / "missing_model.pth"),
+            scaler_path=str(tmp_path / "missing_scaler.json"),
+            config_path=str(tmp_path / "missing_config.json"),
+        )
+        assert pred.predict(["*CC*"]) == [None]

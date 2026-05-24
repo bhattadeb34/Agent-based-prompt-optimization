@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .base import Observation, Tool
+from ..utils.smiles_utils import validate_smiles
 
 
 class SMILESValidatorTool(Tool):
@@ -42,7 +43,7 @@ class SMILESValidatorTool(Tool):
             "required": ["smiles_list"],
         }
 
-    def execute(self, smiles_list: List[str]) -> Observation:
+    def execute(self, smiles_list: List[str], required_markers: Optional[List[str]] = None) -> Observation:
         """Validate SMILES and return detailed results."""
         try:
             from rdkit import Chem
@@ -54,7 +55,17 @@ class SMILESValidatorTool(Tool):
             )
 
         results = []
+        required_markers = required_markers or []
         for smi in smiles_list:
+            ok, reason = validate_smiles(smi, required_markers=required_markers)
+            if not ok:
+                results.append({
+                    "smiles": smi,
+                    "valid": False,
+                    "error": reason,
+                })
+                continue
+
             mol = Chem.MolFromSmiles(smi)
             if mol is None:
                 results.append({
@@ -243,7 +254,7 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            value = self.surrogate.predict_single(smiles)
             if value is None:
                 return Observation(
                     success=False,
@@ -373,21 +384,26 @@ class BatchPropertyPredictorTool(Tool):
     def execute(self, smiles_list: List[str]) -> Observation:
         """Batch prediction."""
         results = []
-        for smi in smiles_list:
-            try:
-                value = self.surrogate.predict(smi)
-                results.append({
-                    "smiles": smi,
-                    "property": value,
-                    "valid": value is not None,
-                })
-            except Exception as e:
-                results.append({
-                    "smiles": smi,
-                    "property": None,
-                    "valid": False,
-                    "error": str(e),
-                })
+        try:
+            values = self.surrogate.predict(smiles_list)
+        except Exception as e:
+            values = [None] * len(smiles_list)
+            errors = [str(e)] * len(smiles_list)
+        else:
+            values = list(values)
+            if len(values) < len(smiles_list):
+                values.extend([None] * (len(smiles_list) - len(values)))
+            errors = [""] * len(smiles_list)
+
+        for smi, value, error in zip(smiles_list, values[:len(smiles_list)], errors):
+            result = {
+                "smiles": smi,
+                "property": value,
+                "valid": value is not None,
+            }
+            if error:
+                result["error"] = error
+            results.append(result)
 
         n_valid = sum(1 for r in results if r["valid"])
         return Observation(

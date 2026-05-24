@@ -223,6 +223,8 @@ class TgGNNPredictor(SurrogatePredictor):
         if os.path.exists(self._config_path):
             with open(self._config_path) as f:
                 cfg = json.load(f)
+        if "architecture" not in cfg and "architecture" in scaler:
+            cfg["architecture"] = scaler["architecture"]
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = _build_model_from_config(cfg).to(device)
@@ -236,13 +238,19 @@ class TgGNNPredictor(SurrogatePredictor):
         model.eval()
         self._model = model
         self._device = device
+        val_rmse = cfg.get("val_rmse_c")
+        rmse_str = f"{val_rmse:.1f}" if isinstance(val_rmse, (int, float)) else "?"
         print(f"[TgGNNPredictor] Loaded {cfg.get('architecture','?')} "
-              f"(val RMSE {cfg.get('val_rmse_c', '?'):.1f} °C) from {self._model_path}")
+              f"(val RMSE {rmse_str} °C) from {self._model_path}")
 
     def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
         if not smiles_list:
             return []
-        self._load()
+        try:
+            self._load()
+        except (FileNotFoundError, KeyError, RuntimeError, ValueError) as e:
+            print(f"[TgGNNPredictor] Model unavailable: {e}")
+            return [None] * len(smiles_list)
 
         from torch_geometric.loader import DataLoader
         valid_idx, valid_data = [], []

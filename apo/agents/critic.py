@@ -462,10 +462,17 @@ Return JSON:
 
     def _run_debate(self, alternatives: Dict) -> Dict:
         """Run debate between top 2 alternatives."""
-        alt_list = [v for k, v in alternatives.items() if isinstance(v, dict)]
+        alt_list = [
+            v for v in alternatives.values()
+            if isinstance(v, dict) and isinstance(v.get("strategy"), str) and v.get("strategy").strip()
+        ]
         if len(alt_list) < 2:
             # Not enough alternatives, return first
-            return alt_list[0] if alt_list else {"strategy": "fallback", "rationale": "no alternatives", "name": "fallback"}
+            return alt_list[0] if alt_list else {
+                "strategy": self.current_state.strategy_text if self.current_state else "fallback",
+                "rationale": "No valid alternatives returned by critic",
+                "name": "fallback",
+            }
 
         # Debate top 2
         debate_tool = next((t for t in self.tools if t.name == "debate_strategies"), None)

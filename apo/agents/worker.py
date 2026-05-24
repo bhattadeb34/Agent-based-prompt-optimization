@@ -27,6 +27,7 @@ from .tools import (
     SMILESValidatorTool,
 )
 from ..core.llm_client import LLMUsage, call_llm
+from ..utils.smiles_utils import compute_similarity
 from ..task_context import TaskContext
 
 
@@ -420,7 +421,7 @@ Return JSON (ONLY JSON, no other text):
         smiles_list = [c["child_smiles"] for c in candidates_raw]
 
         # Validate
-        obs = validator.execute(smiles_list=smiles_list)
+        obs = validator.execute(smiles_list=smiles_list, required_markers=self.ctx.smiles_markers)
         validation_results = obs.result if obs.success else []
 
         # Merge validation results back
@@ -436,27 +437,29 @@ Return JSON (ONLY JSON, no other text):
 
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
-                except:
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
+                except Exception:
                     self.parent_cache[parent_smiles] = None
 
             cand["parent_property"] = self.parent_cache.get(parent_smiles)
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
+                    cand["child_property"] = self.surrogate.predict_single(child_smiles)
                     if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                        if self.ctx.maximize:
+                            cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                        else:
+                            cand["improvement_factor"] = cand["parent_property"] / cand["child_property"]
                     else:
                         cand["improvement_factor"] = 0.0
 
-                    # Calculate similarity
-                    sim_tool = next((t for t in self.tools if t.name == "calculate_similarity"), None)
-                    if sim_tool:
-                        sim_obs = sim_tool.execute(smiles1=parent_smiles, smiles2=child_smiles)
-                        cand["similarity"] = sim_obs.result.get("similarity", 0.0) if sim_obs.success else 0.0
-                    else:
-                        cand["similarity"] = 0.5  # Default
+                    cand["similarity"] = compute_similarity(
+                        child_smiles,
+                        parent_smiles,
+                        similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                        marker_strip_tokens=self.ctx.marker_strip_tokens,
+                    )
 
                 except Exception as e:
                     cand["valid"] = False
