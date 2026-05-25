@@ -2,6 +2,7 @@ import json
 from typing import List, Optional
 
 from apo.agentic_engine import _merge_usage_summary
+from apo.agents.base import Action
 from apo.agents.critic import CriticAgent
 from apo.agents.tools import BatchPropertyPredictorTool, PropertyPredictorTool
 from apo.agents.worker import WorkerAgent
@@ -106,6 +107,11 @@ def test_critic_refine_scores_current_and_new_state(monkeypatch):
         return next(responses), LLMUsage("test-model", 1, 1, 0.01)
 
     monkeypatch.setattr("apo.agents.critic.call_llm", fake_call_llm)
+    monkeypatch.setattr(
+        CriticAgent,
+        "_select_action",
+        lambda self, thought: Action(tool_name="noop", arguments={}),
+    )
 
     current = PromptState.seed("initial")
     history = PromptStateHistory()
