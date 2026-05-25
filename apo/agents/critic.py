@@ -260,6 +260,10 @@ META ADVICE:
         Returns:
             (new_state, analysis, usage)
         """
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = self.reward_fn.compute(valid_candidates)
+        current_state.score = reward
+
         # Reset state
         self.candidates = candidates
         self.current_state = current_state
@@ -278,6 +282,13 @@ META ADVICE:
 
         # Save interpretability trace
         self._save_trace_to_disk()
+
+        if self.new_state is not None:
+            self.new_state.score = reward
+            self.new_state.metadata.update({
+                "reward": reward,
+                "n_valid": len(valid_candidates),
+            })
 
         # Aggregate usage
         from ..core.llm_client import aggregate_usage
