@@ -207,7 +207,7 @@ ANALYSIS SO FAR:
         if not self.history:
             return "No history"
 
-        recent = self.history.all()[-3:]
+        recent = self.history.all_states[-3:]
         lines = []
         for state in recent:
             lines.append(f"v{state.version}: {state.strategy_text[:100]}...")
@@ -229,12 +229,12 @@ ANALYSIS SO FAR:
         self,
         history: PromptStateHistory,
         reward_history: List[float],
-    ) -> Tuple[str, Optional[LLMUsage]]:
+    ) -> Tuple[str, List[LLMUsage]]:
         """
         Main entry point: Analyze state and provide advice if needed.
 
         Returns:
-            (advice_string, usage_or_none)
+            (advice_string, usages)
         """
         # Reset state
         self.history = history
@@ -254,13 +254,7 @@ ANALYSIS SO FAR:
         # Save interpretability trace
         self._save_trace_to_disk()
 
-        # Aggregate usage
-        if self.all_usages:
-            from ..core.llm_client import aggregate_usage
-            total_usage = aggregate_usage(self.all_usages)
-            return self.advice, total_usage
-        else:
-            return self.advice, None
+        return self.advice, list(self.all_usages)
 
     def _generate_thought(self, iteration: int) -> Thought:
         """Override: Meta-specific thought generation."""

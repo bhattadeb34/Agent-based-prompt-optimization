@@ -123,28 +123,22 @@ def run_agentic_mode(
               f"{sum(1 for c in candidates if c.get('valid'))} valid")
 
         # Critic agent: Refine strategy
-        new_state, analysis, critic_usage = critic.refine(
+        new_state, analysis, critic_usages = critic.refine(
             candidates=candidates,
             current_state=current_state,
             history=history,
             meta_advice=meta_advice,
         )
-        all_usages.append(critic_usage)
+        all_usages.extend(critic_usages)
 
         print(f"[Critic] Refined strategy to v{new_state.version}")
 
         # Calculate reward
-        reward = new_state.score or 0.0
+        reward = current_state.score or 0.0
         pareto_data = reward_fn.pareto_data([c for c in candidates if c.get("valid")])
 
         # Log epoch
-        # critic_usage is already aggregated dict, worker_usages are LLMUsage objects
-        all_usages_this_epoch = worker_usages.copy()
-        epoch_usage = aggregate_usage(all_usages_this_epoch)
-        # Manually merge critic_usage dict into epoch_usage
-        if critic_usage:
-            epoch_usage["total_calls"] = epoch_usage.get("total_calls", 0) + critic_usage.get("total_calls", 0)
-            epoch_usage["total_tokens"] = epoch_usage.get("total_tokens", 0) + critic_usage.get("total_tokens", 0)
+        epoch_usage = aggregate_usage(worker_usages + critic_usages)
 
         logger.log_epoch(
             epoch=epoch,
@@ -163,11 +157,9 @@ def run_agentic_mode(
 
         # Meta agent: Get advice if needed
         if epoch % meta_interval == 0 or epoch == n_epochs:
-            meta_advice, meta_usage = meta.get_advice(history, logger.reward_history)
-            # meta_usage is also a dict (aggregated), not LLMUsage object
-            if meta_usage and isinstance(meta_usage, dict):
-                # Can't append dict to list of LLMUsage, just track separately
-                pass
+            meta_advice, meta_usages = meta.get_advice(history, logger.reward_history)
+            if meta_usages:
+                all_usages.extend(meta_usages)
             if meta_advice:
                 print(f"[Meta] Advice: {meta_advice[:200]}...")
                 logger.save_agent_trace(f"meta_epoch_{epoch}", meta._interpretability_trace)
