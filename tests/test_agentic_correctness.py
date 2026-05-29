@@ -101,7 +101,7 @@ def test_critic_persists_reward_and_returns_usage_objects(monkeypatch):
     history.add(current)
     usage = LLMUsage("critic-model", 3, 4, 0.1)
 
-    def fake_run(_initial_state):
+    def fake_run(initial_state=""):
         critic.new_state = PromptState(
             strategy_text="next strategy",
             version=current.version + 1,
