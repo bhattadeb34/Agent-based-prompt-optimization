@@ -253,7 +253,7 @@ META ADVICE:
         current_state: PromptState,
         history: PromptStateHistory,
         meta_advice: str = "",
-    ) -> Tuple[PromptState, Dict, LLMUsage]:
+    ) -> Tuple[PromptState, Dict, List[LLMUsage]]:
         """
         Main entry point: Refine strategy based on results.
 
@@ -273,17 +273,29 @@ META ADVICE:
 
         print(f"\n[CriticAgent] Refining strategy v{current_state.version} → v{current_state.version + 1}")
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = self.reward_fn.compute(valid_candidates)
+        current_state.score = reward
+
         # Run ReAct loop
         result, steps = self.run(initial_state="")
+
+        if self.new_state is None:
+            self.new_state = PromptState(
+                strategy_text=current_state.strategy_text,
+                version=current_state.version + 1,
+                score=reward,
+                rationale="Fallback (critic did not produce a new strategy)",
+                parent_version=current_state.version,
+                model_used=self.model,
+            )
+        else:
+            self.new_state.score = reward
 
         # Save interpretability trace
         self._save_trace_to_disk()
 
-        # Aggregate usage
-        from ..core.llm_client import aggregate_usage
-        total_usage = aggregate_usage(self.all_usages)
-
-        return self.new_state, self.analysis, total_usage
+        return self.new_state, self.analysis, list(self.all_usages)
 
     def _generate_thought(self, iteration: int) -> Thought:
         """Override: Critic-specific thought generation."""
