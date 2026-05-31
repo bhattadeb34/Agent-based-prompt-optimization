@@ -23,8 +23,8 @@ class StrictSurrogate(SurrogatePredictor):
     def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
         if isinstance(smiles_list, str):
             raise TypeError("predict expects a list, not a string")
-        canonical_child = canonicalize(VALID_CHILD)
-        return [2.0 if smi == canonical_child else 1.0 for smi in smiles_list]
+        child_forms = {VALID_CHILD, canonicalize(VALID_CHILD)}
+        return [2.0 if smi in child_forms else 1.0 for smi in smiles_list]
 
 
 def polymer_ctx() -> TaskContext:
