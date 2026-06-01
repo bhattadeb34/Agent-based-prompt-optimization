@@ -131,7 +131,8 @@ def test_meta_recent_strategy_format_uses_history_api():
 
     formatted = meta._format_recent_strategies()
 
-    assert "v1:" not in formatted
+    assert "v0:" not in formatted
+    assert "v1:" in formatted
     assert "v2:" in formatted
     assert "v3:" in formatted
 
