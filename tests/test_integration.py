@@ -11,6 +11,10 @@ import pytest
 from apo.core.llm_client import LLMUsage
 from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import ParetoHypervolume
+from apo.agentic_engine import run_agentic_mode
+from apo.agents.meta import MetaAgent
+from apo.agents.tools import BatchPropertyPredictorTool, PropertyPredictorTool
+from apo.agents.worker import WorkerAgent
 from apo.logging.run_logger import RunLogger
 from apo.optimizer.inner_loop import InnerLoop
 from apo.optimizer.outer_loop import OuterLoop
@@ -28,6 +32,19 @@ class MockSurrogate(SurrogatePredictor):
 
     def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
         return [1.0] * len(smiles_list)
+
+
+class StrictMockSurrogate(SurrogatePredictor):
+    property_name = "TestProp"
+    property_units = "units"
+    maximize = True
+
+    def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
+        assert isinstance(smiles_list, list), "predict() must receive a batch list"
+        values = []
+        for smiles in smiles_list:
+            values.append(2.0 if smiles.count("O") >= 4 else 1.0)
+        return values
 
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
@@ -243,3 +260,128 @@ class TestFullPipelineSmoke:
         # Process a plain SMILES child (no [Cu]/[Au]) — should be valid
         candidate = inner._process_candidate("CCO", "reason", "CC", 1.0)
         assert candidate["valid"] is True, f"Expected valid: {candidate}"
+
+
+class TestAgenticRegressions:
+    def test_worker_validation_uses_task_context_and_batch_predict_api(self):
+        worker = WorkerAgent(
+            model="test-model",
+            api_keys={},
+            task_context=POLYMER_CTX,
+            surrogate=StrictMockSurrogate(),
+            parent_cache={},
+        )
+
+        candidates = worker._validate_candidates([
+            {
+                "parent_smiles": VALID_PARENT,
+                "child_smiles": VALID_CHILD,
+                "explanation": "keeps required markers",
+            },
+            {
+                "parent_smiles": VALID_PARENT,
+                "child_smiles": "CCO",
+                "explanation": "drops required markers",
+            },
+        ])
+
+        assert candidates[0]["valid"] is True, candidates[0]
+        assert isinstance(candidates[0]["child_property"], float)
+        assert candidates[0]["improvement_factor"] == 2.0
+        assert candidates[1]["valid"] is False
+        assert "required marker" in candidates[1]["invalid_reason"].lower()
+
+    def test_property_tools_pass_batches_not_bare_strings(self):
+        surrogate = StrictMockSurrogate()
+
+        single = PropertyPredictorTool(surrogate, "TestProp").execute(VALID_CHILD)
+        assert single.success is True
+        assert single.result["TestProp"] == 2.0
+
+        batch = BatchPropertyPredictorTool(surrogate, "TestProp").execute([VALID_PARENT, VALID_CHILD])
+        assert batch.success is True
+        assert [row["property"] for row in batch.result] == [1.0, 2.0]
+
+    def test_meta_formats_recent_strategies_without_history_all_crash(self):
+        history = PromptStateHistory()
+        history.add(PromptState.seed("seed strategy"))
+        history.add(PromptState(strategy_text="v1 strategy", version=1, rationale="r"))
+
+        meta = MetaAgent(
+            model="test-model",
+            api_keys={},
+            task_context=GENERIC_CTX,
+        )
+        meta.history = history
+
+        formatted = meta._format_recent_strategies()
+        assert "v0: seed strategy" in formatted
+        assert "v1: v1 strategy" in formatted
+
+    def test_agentic_mode_logs_reward_for_strategy_that_generated_candidates(self, tmp_run_dir):
+        class DummyWorker:
+            def __init__(self, **kwargs):
+                self._interpretability_trace = {"agent": "worker"}
+
+            def generate(self, strategy, parent_smiles, n_per_molecule):
+                assert strategy == GENERIC_CTX.seed_strategy
+                return ([{
+                    "parent_smiles": "CC",
+                    "child_smiles": "CCO",
+                    "explanation": "adds oxygen",
+                    "parent_property": 1.0,
+                    "child_property": 2.0,
+                    "improvement_factor": 2.0,
+                    "similarity": 0.5,
+                    "valid": True,
+                    "invalid_reason": "",
+                }], [MOCK_USAGE])
+
+        class DummyCritic:
+            def __init__(self, **kwargs):
+                self._interpretability_trace = {"agent": "critic"}
+
+            def refine(self, candidates, current_state, history, meta_advice=""):
+                assert current_state.score == 2.0
+                return (
+                    PromptState(
+                        strategy_text="refined next strategy",
+                        version=current_state.version + 1,
+                        rationale="r",
+                        parent_version=current_state.version,
+                    ),
+                    {"analysis": "ok"},
+                    {"total_calls": 1, "total_tokens": 7, "by_model": {"critic": {"calls": 1, "tokens": 7}}},
+                )
+
+        class DummyMeta:
+            def __init__(self, **kwargs):
+                self._interpretability_trace = {"agent": "meta"}
+
+            def get_advice(self, history, reward_history):
+                return "", {"total_calls": 1, "total_tokens": 3, "by_model": {"meta": {"calls": 1, "tokens": 3}}}
+
+        cfg = {
+            "task": {"surrogate": "mock"},
+            "models": {"worker": "worker", "critic": "critic", "meta": "meta"},
+            "optimization": {
+                "n_outer_epochs": 1,
+                "n_per_molecule": 1,
+                "batch_size": 1,
+                "reward_function": "property_only",
+            },
+            "temperatures": {},
+        }
+        logger = RunLogger(tmp_run_dir)
+
+        with patch("apo.agentic_engine.get_surrogate", return_value=StrictMockSurrogate()), \
+             patch("apo.agentic_engine.WorkerAgent", DummyWorker), \
+             patch("apo.agentic_engine.CriticAgent", DummyCritic), \
+             patch("apo.agentic_engine.MetaAgent", DummyMeta):
+            run_agentic_mode(cfg, GENERIC_CTX, ["CC"], logger, api_keys={})
+
+        records = logger.load_existing_epochs()
+        assert len(records) == 1
+        assert records[0]["reward"] == 2.0
+        assert records[0]["prompt_state"]["strategy_text"] == GENERIC_CTX.seed_strategy
+        assert records[0]["prompt_state"]["strategy_text"] != "refined next strategy"
