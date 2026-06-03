@@ -253,7 +253,7 @@ META ADVICE:
         current_state: PromptState,
         history: PromptStateHistory,
         meta_advice: str = "",
-    ) -> Tuple[PromptState, Dict, LLMUsage]:
+    ) -> Tuple[PromptState, Dict, Dict]:
         """
         Main entry point: Refine strategy based on results.
 
@@ -273,8 +273,19 @@ META ADVICE:
 
         print(f"\n[CriticAgent] Refining strategy v{current_state.version} → v{current_state.version + 1}")
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = self.reward_fn.compute(valid_candidates)
+        current_state.score = reward
+
         # Run ReAct loop
         result, steps = self.run(initial_state="")
+
+        if self.new_state is not None:
+            self.new_state.metadata.update({
+                "parent_reward": reward,
+                "pareto_hypervolume": self.reward_fn.pareto_data(valid_candidates).get("hypervolume", 0.0),
+                "n_valid": len(valid_candidates),
+            })
 
         # Save interpretability trace
         self._save_trace_to_disk()
