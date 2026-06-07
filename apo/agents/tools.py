@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .base import Observation, Tool
+from ..utils.smiles_utils import compute_similarity
 
 
 class SMILESValidatorTool(Tool):
@@ -186,27 +187,22 @@ class SimilarityCalculatorTool(Tool):
             "required": ["smiles1", "smiles2"],
         }
 
+    def __init__(
+        self,
+        similarity_on_repeat_unit: bool = False,
+        marker_strip_tokens: Optional[List[str]] = None,
+    ):
+        self.similarity_on_repeat_unit = similarity_on_repeat_unit
+        self.marker_strip_tokens = marker_strip_tokens or []
+
     def execute(self, smiles1: str, smiles2: str) -> Observation:
         """Calculate Tanimoto similarity."""
-        try:
-            from rdkit import Chem, DataStructs
-            from rdkit.Chem import AllChem
-        except ImportError:
-            return Observation(success=False, result=None, error="RDKit not available")
-
-        mol1 = Chem.MolFromSmiles(smiles1)
-        mol2 = Chem.MolFromSmiles(smiles2)
-
-        if mol1 is None or mol2 is None:
-            return Observation(
-                success=False,
-                result=None,
-                error="One or both SMILES are invalid",
-            )
-
-        fp1 = AllChem.GetMorganFingerprint(mol1, 2)
-        fp2 = AllChem.GetMorganFingerprint(mol2, 2)
-        similarity = DataStructs.TanimotoSimilarity(fp1, fp2)
+        similarity = compute_similarity(
+            smiles1,
+            smiles2,
+            similarity_on_repeat_unit=self.similarity_on_repeat_unit,
+            marker_strip_tokens=self.marker_strip_tokens,
+        )
 
         return Observation(
             success=True,
@@ -243,7 +239,7 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            value = self.surrogate.predict_single(smiles)
             if value is None:
                 return Observation(
                     success=False,
@@ -373,20 +369,31 @@ class BatchPropertyPredictorTool(Tool):
     def execute(self, smiles_list: List[str]) -> Observation:
         """Batch prediction."""
         results = []
-        for smi in smiles_list:
-            try:
-                value = self.surrogate.predict(smi)
-                results.append({
-                    "smiles": smi,
-                    "property": value,
-                    "valid": value is not None,
-                })
-            except Exception as e:
+        try:
+            values = self.surrogate.predict(smiles_list)
+        except Exception as e:
+            values = [None] * len(smiles_list)
+            error = str(e)
+        else:
+            error = ""
+
+        for smi, value in zip(smiles_list, values):
+            result = {
+                "smiles": smi,
+                "property": value,
+                "valid": value is not None,
+            }
+            if value is None and error:
+                result["error"] = error
+            results.append(result)
+
+        if len(results) < len(smiles_list):
+            for smi in smiles_list[len(results):]:
                 results.append({
                     "smiles": smi,
                     "property": None,
                     "valid": False,
-                    "error": str(e),
+                    "error": "Predictor returned too few results",
                 })
 
         n_valid = sum(1 for r in results if r["valid"])
