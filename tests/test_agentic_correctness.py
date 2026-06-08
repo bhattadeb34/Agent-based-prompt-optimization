@@ -34,7 +34,7 @@ class StrictSurrogate(SurrogatePredictor):
         self.calls.append(list(smiles_list))
         values = []
         for smiles in smiles_list:
-            if "COCCOC" in smiles:
+            if "COCCO" in smiles and "CSCCO" not in smiles:
                 values.append(2.0)
             elif smiles == MISSING_MARKER_CHILD:
                 values.append(3.0)
