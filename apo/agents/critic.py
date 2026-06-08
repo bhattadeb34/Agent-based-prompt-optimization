@@ -271,6 +271,10 @@ META ADVICE:
         self.steps = []
         self.all_usages = []
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = self.reward_fn.compute(valid_candidates)
+        current_state.score = reward
+
         print(f"\n[CriticAgent] Refining strategy v{current_state.version} → v{current_state.version + 1}")
 
         # Run ReAct loop
@@ -436,12 +440,20 @@ Return JSON:
             selected = self._run_debate(alternatives)
 
             # Create new state
+            valid_candidates = [c for c in self.candidates if c.get("valid")]
+            reward = self.current_state.score if self.current_state else self.reward_fn.compute(valid_candidates)
+            pareto_data = self.reward_fn.pareto_data(valid_candidates)
             self.new_state = PromptState(
                 strategy_text=selected["strategy"],
                 version=self.current_state.version + 1,
                 rationale=selected["rationale"],
                 parent_version=self.current_state.version,
                 model_used=self.model,
+                metadata={
+                    "reward": reward,
+                    "pareto_hypervolume": pareto_data.get("hypervolume", 0.0),
+                    "n_valid": len(valid_candidates),
+                },
             )
 
             return Thought(
@@ -457,6 +469,10 @@ Return JSON:
                 rationale="Fallback (JSON parse failed)",
                 parent_version=self.current_state.version,
                 model_used=self.model,
+                metadata={
+                    "reward": self.current_state.score,
+                    "n_valid": len([c for c in self.candidates if c.get("valid")]),
+                },
             )
             return Thought(content=text)
 

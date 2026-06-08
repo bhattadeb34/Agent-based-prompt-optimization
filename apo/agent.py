@@ -341,6 +341,7 @@ class OrchestratorAgent:
 
         used = self.tool_budget - budget_remaining
         print(f"\n[Agent] Run complete. {used}/{self.tool_budget} tools used.")
+        self.logger.save_prompt_history(self.history.to_list())
         return str(self.logger.run_dir)
 
     # ── LLM call logic ────────────────────────────────────────────────────────
