@@ -2,6 +2,7 @@
 from typing import List, Optional
 
 from apo.agentic_engine import run_agentic_mode
+from apo.agents.base import Action, Observation
 from apo.agents.critic import CriticAgent
 from apo.agents.meta import MetaAgent
 from apo.agents.tools import BatchPropertyPredictorTool, PropertyPredictorTool
@@ -31,12 +32,15 @@ class StrictSurrogate(SurrogatePredictor):
         if isinstance(smiles_list, str):
             raise AssertionError("predict() must receive a list, not a scalar string")
         self.calls.append(list(smiles_list))
-        values = {
-            VALID_PARENT: 1.0,
-            VALID_CHILD: 2.0,
-            MISSING_MARKER_CHILD: 3.0,
-        }
-        return [values.get(smiles, 1.0) for smiles in smiles_list]
+        values = []
+        for smiles in smiles_list:
+            if "COCCOC" in smiles:
+                values.append(2.0)
+            elif smiles == MISSING_MARKER_CHILD:
+                values.append(3.0)
+            else:
+                values.append(1.0)
+        return values
 
 
 POLYMER_CTX = TaskContext(
@@ -132,6 +136,16 @@ def test_critic_refine_scores_evaluated_current_state(monkeypatch):
         return next(responses), LLMUsage("test-model", 1, 1, 0.0)
 
     monkeypatch.setattr("apo.agents.critic.call_llm", fake_call_llm)
+    monkeypatch.setattr(
+        CriticAgent,
+        "_select_action",
+        lambda self, thought: Action("noop", {}, ""),
+    )
+    monkeypatch.setattr(
+        CriticAgent,
+        "_execute_action",
+        lambda self, action: Observation(success=True, result=None),
+    )
 
     current = PromptState.seed("current")
     history = PromptStateHistory()
