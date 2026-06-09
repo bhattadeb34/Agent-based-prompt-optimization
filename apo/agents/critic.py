@@ -271,6 +271,10 @@ META ADVICE:
         self.steps = []
         self.all_usages = []
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = self.reward_fn.compute(valid_candidates)
+        current_state.score = reward
+
         print(f"\n[CriticAgent] Refining strategy v{current_state.version} → v{current_state.version + 1}")
 
         # Run ReAct loop
@@ -282,6 +286,12 @@ META ADVICE:
         # Aggregate usage
         from ..core.llm_client import aggregate_usage
         total_usage = aggregate_usage(self.all_usages)
+
+        if self.new_state is not None:
+            self.new_state.metadata.update({
+                "previous_reward": reward,
+                "n_valid": len(valid_candidates),
+            })
 
         return self.new_state, self.analysis, total_usage
 
