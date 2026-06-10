@@ -1,4 +1,3 @@
-import json
 from typing import List, Optional
 from unittest.mock import patch
 
@@ -95,39 +94,15 @@ def test_critic_assigns_reward_to_current_strategy():
         reward_fn=ParetoHypervolume(),
     )
 
-    analysis_response = json.dumps({
-        "pareto_insights": ["larger alkyl chain improved property"],
-        "failure_patterns": [],
-        "unexplored_space": ["branching"],
-        "tradeoffs": "similarity remains acceptable",
-        "confidence": 0.9,
-    })
-    alternatives_response = json.dumps({
-        "alternative_1": {
-            "name": "Extend",
-            "strategy": "Extend carbon chains while preserving parent motif.",
-            "rationale": "The best candidate improved by extension.",
-        },
-        "alternative_2": {
-            "name": "Branch",
-            "strategy": "Explore modest branching near the parent motif.",
-            "rationale": "Branching is unexplored.",
-        },
-    })
-    debate_response = json.dumps({
-        "consensus": "A",
-        "consensus_rationale": "Use the evidenced extension pattern.",
-        "confidence": 0.8,
-    })
+    def fake_run(*_args, **_kwargs):
+        critic.new_state = PromptState(
+            strategy_text="next strategy",
+            version=current.version + 1,
+            parent_version=current.version,
+        )
+        return (critic.new_state, critic.analysis), []
 
-    with patch(
-        "apo.agents.critic.call_llm",
-        side_effect=[
-            (analysis_response, MOCK_USAGE),
-            (alternatives_response, MOCK_USAGE),
-            (debate_response, MOCK_USAGE),
-        ],
-    ):
+    with patch.object(critic, "run", side_effect=fake_run):
         new_state, _, _ = critic.refine(candidates, current, history)
 
     assert current.score == 1.5
