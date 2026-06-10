@@ -129,12 +129,11 @@ def run_agentic_mode(
             history=history,
             meta_advice=meta_advice,
         )
-        all_usages.append(critic_usage)
 
         print(f"[Critic] Refined strategy to v{new_state.version}")
 
-        # Calculate reward
-        reward = new_state.score or 0.0
+        # Calculate reward for the strategy that generated this epoch's candidates.
+        reward = current_state.score or 0.0
         pareto_data = reward_fn.pareto_data([c for c in candidates if c.get("valid")])
 
         # Log epoch
@@ -148,7 +147,7 @@ def run_agentic_mode(
 
         logger.log_epoch(
             epoch=epoch,
-            prompt_state_dict=new_state.to_dict(),
+            prompt_state_dict=current_state.to_dict(),
             candidates=candidates,
             reward=reward,
             pareto_data=pareto_data,
