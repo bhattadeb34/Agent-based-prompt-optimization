@@ -17,6 +17,9 @@ from .base import Observation, Tool
 class SMILESValidatorTool(Tool):
     """Validate SMILES strings using RDKit before sending to predictor."""
 
+    def __init__(self, required_markers: Optional[List[str]] = None):
+        self.required_markers = required_markers or []
+
     @property
     def name(self) -> str:
         return "validate_smiles"
@@ -55,6 +58,15 @@ class SMILESValidatorTool(Tool):
 
         results = []
         for smi in smiles_list:
+            missing_marker = next((m for m in self.required_markers if m not in smi), None)
+            if missing_marker:
+                results.append({
+                    "smiles": smi,
+                    "valid": False,
+                    "error": f"Missing required marker: {missing_marker}",
+                })
+                continue
+
             mol = Chem.MolFromSmiles(smi)
             if mol is None:
                 results.append({
@@ -164,6 +176,14 @@ class SMILESRepairTool(Tool):
 class SimilarityCalculatorTool(Tool):
     """Calculate structural similarity between molecules."""
 
+    def __init__(
+        self,
+        similarity_on_repeat_unit: bool = False,
+        marker_strip_tokens: Optional[List[str]] = None,
+    ):
+        self.similarity_on_repeat_unit = similarity_on_repeat_unit
+        self.marker_strip_tokens = marker_strip_tokens or []
+
     @property
     def name(self) -> str:
         return "calculate_similarity"
@@ -189,24 +209,29 @@ class SimilarityCalculatorTool(Tool):
     def execute(self, smiles1: str, smiles2: str) -> Observation:
         """Calculate Tanimoto similarity."""
         try:
-            from rdkit import Chem, DataStructs
-            from rdkit.Chem import AllChem
+            from rdkit import Chem
+            from ..utils.smiles_utils import compute_similarity
         except ImportError:
             return Observation(success=False, result=None, error="RDKit not available")
 
-        mol1 = Chem.MolFromSmiles(smiles1)
-        mol2 = Chem.MolFromSmiles(smiles2)
-
-        if mol1 is None or mol2 is None:
+        check1, check2 = smiles1, smiles2
+        if self.similarity_on_repeat_unit and self.marker_strip_tokens:
+            for tok in self.marker_strip_tokens:
+                check1 = check1.replace(tok, "")
+                check2 = check2.replace(tok, "")
+        if Chem.MolFromSmiles(check1) is None or Chem.MolFromSmiles(check2) is None:
             return Observation(
                 success=False,
                 result=None,
                 error="One or both SMILES are invalid",
             )
 
-        fp1 = AllChem.GetMorganFingerprint(mol1, 2)
-        fp2 = AllChem.GetMorganFingerprint(mol2, 2)
-        similarity = DataStructs.TanimotoSimilarity(fp1, fp2)
+        similarity = compute_similarity(
+            smiles1,
+            smiles2,
+            similarity_on_repeat_unit=self.similarity_on_repeat_unit,
+            marker_strip_tokens=self.marker_strip_tokens,
+        )
 
         return Observation(
             success=True,
@@ -243,7 +268,7 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            value = self.surrogate.predict_single(smiles)
             if value is None:
                 return Observation(
                     success=False,
@@ -375,7 +400,7 @@ class BatchPropertyPredictorTool(Tool):
         results = []
         for smi in smiles_list:
             try:
-                value = self.surrogate.predict(smi)
+                value = self.surrogate.predict_single(smi)
                 results.append({
                     "smiles": smi,
                     "property": value,
