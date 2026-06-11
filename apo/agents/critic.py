@@ -276,6 +276,10 @@ META ADVICE:
         # Run ReAct loop
         result, steps = self.run(initial_state="")
 
+        if self.new_state is not None:
+            valid_candidates = [c for c in self.candidates if c.get("valid")]
+            self.new_state.score = self.reward_fn.compute(valid_candidates)
+
         # Save interpretability trace
         self._save_trace_to_disk()
 

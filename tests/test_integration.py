@@ -15,6 +15,8 @@ from apo.logging.run_logger import RunLogger
 from apo.optimizer.inner_loop import InnerLoop
 from apo.optimizer.outer_loop import OuterLoop
 from apo.optimizer.meta_loop import MetaLoop
+from apo.agents.worker import WorkerAgent
+from apo.agentic_engine import run_agentic_mode
 from apo.surrogates.base import SurrogatePredictor
 from apo.task_context import TaskContext
 
@@ -28,6 +30,20 @@ class MockSurrogate(SurrogatePredictor):
 
     def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
         return [1.0] * len(smiles_list)
+
+
+class StrictBatchSurrogate(SurrogatePredictor):
+    property_name = "TestProp"
+    property_units = "units"
+    maximize = True
+
+    def __init__(self):
+        self.calls = []
+
+    def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
+        assert isinstance(smiles_list, list), "predict() must receive a batch list"
+        self.calls.append(list(smiles_list))
+        return [2.0 if "[Au]" in smi else 1.0 for smi in smiles_list]
 
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
@@ -243,3 +259,115 @@ class TestFullPipelineSmoke:
         # Process a plain SMILES child (no [Cu]/[Au]) — should be valid
         candidate = inner._process_candidate("CCO", "reason", "CC", 1.0)
         assert candidate["valid"] is True, f"Expected valid: {candidate}"
+
+
+class TestAgenticRegressions:
+    def test_worker_uses_scalar_predict_and_task_validation(self):
+        surrogate = StrictBatchSurrogate()
+        worker = WorkerAgent(
+            model="gemini/gemini-2.0-flash",
+            api_keys={},
+            task_context=POLYMER_CTX,
+            surrogate=surrogate,
+            parent_cache={},
+        )
+
+        candidates = worker._validate_candidates([
+            {
+                "parent_smiles": VALID_PARENT,
+                "child_smiles": VALID_CHILD,
+                "explanation": "valid polymer",
+            },
+            {
+                "parent_smiles": VALID_PARENT,
+                "child_smiles": "CCO",
+                "explanation": "missing required markers",
+            },
+        ])
+
+        assert candidates[0]["valid"] is True
+        assert candidates[0]["child_property"] == 2.0
+        assert isinstance(candidates[0]["improvement_factor"], float)
+        assert candidates[1]["valid"] is False
+        assert "Missing required marker" in candidates[1]["invalid_reason"]
+        assert all(isinstance(call, list) for call in surrogate.calls)
+
+    def test_agentic_engine_logs_reward_kwargs_and_merges_usage_dicts(self, tmp_run_dir):
+        from apo.core.prompt_state import PromptState
+        from apo import agentic_engine as engine
+
+        class FakeWorker:
+            def __init__(self, **kwargs):
+                self._interpretability_trace = []
+
+            def generate(self, strategy, parent_smiles, n_per_molecule):
+                return ([{
+                    "parent_smiles": "CC",
+                    "child_smiles": "CCO",
+                    "parent_property": 1.0,
+                    "child_property": 2.0,
+                    "improvement_factor": 2.0,
+                    "similarity": 0.0,
+                    "valid": True,
+                }], [MOCK_USAGE])
+
+        class FakeCritic:
+            def __init__(self, **kwargs):
+                self._interpretability_trace = []
+
+            def refine(self, candidates, current_state, history, meta_advice=""):
+                return (
+                    PromptState(
+                        strategy_text="next",
+                        version=current_state.version + 1,
+                        parent_version=current_state.version,
+                    ),
+                    {},
+                    {
+                        "total_calls": 1,
+                        "total_prompt_tokens": 3,
+                        "total_completion_tokens": 4,
+                        "total_tokens": 7,
+                        "total_latency_s": 0.1,
+                        "by_model": {"critic": {"calls": 1, "tokens": 7}},
+                    },
+                )
+
+        class FakeMeta:
+            def __init__(self, **kwargs):
+                self._interpretability_trace = []
+
+            def get_advice(self, history, reward_history):
+                return ("", {
+                    "total_calls": 1,
+                    "total_prompt_tokens": 5,
+                    "total_completion_tokens": 6,
+                    "total_tokens": 11,
+                    "total_latency_s": 0.2,
+                    "by_model": {"meta": {"calls": 1, "tokens": 11}},
+                })
+
+        cfg = {
+            "task": {"surrogate": "mock"},
+            "models": {"worker": "worker", "critic": "critic", "meta": "meta"},
+            "optimization": {
+                "n_outer_epochs": 1,
+                "n_per_molecule": 1,
+                "batch_size": 1,
+                "meta_interval": 1,
+                "reward_function": "weighted_sum",
+                "reward_function_kwargs": {"alpha": 1.0},
+            },
+        }
+        logger = RunLogger(tmp_run_dir)
+
+        with patch.object(engine, "get_surrogate", return_value=MockSurrogate()), \
+             patch.object(engine, "WorkerAgent", FakeWorker), \
+             patch.object(engine, "CriticAgent", FakeCritic), \
+             patch.object(engine, "MetaAgent", FakeMeta):
+            run_agentic_mode(cfg, GENERIC_CTX, ["CC"], logger, api_keys={})
+
+        records = logger.load_existing_epochs()
+        assert records[0]["reward"] == 2.0
+        assert records[0]["prompt_state"]["score"] == 2.0
+        assert records[0]["llm_usage"]["total_calls"] == 2
