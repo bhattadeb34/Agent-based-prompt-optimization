@@ -381,7 +381,7 @@ class BatchPropertyPredictorTool(Tool):
         else:
             errors = [""] * len(smiles_list)
 
-        for smi, value, error in zip(smiles_list, values):
+        for smi, value, error in zip(smiles_list, values, errors):
             item = {
                 "smiles": smi,
                 "property": value,
