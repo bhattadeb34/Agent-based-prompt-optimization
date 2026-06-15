@@ -276,6 +276,16 @@ META ADVICE:
         # Run ReAct loop
         result, steps = self.run(initial_state="")
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = self.reward_fn.compute(valid_candidates)
+        current_state.score = reward
+        if self.new_state is not None:
+            self.new_state.metadata.update({
+                "reward": reward,
+                "pareto_hypervolume": self.reward_fn.pareto_data(valid_candidates).get("hypervolume", 0.0),
+                "n_valid": len(valid_candidates),
+            })
+
         # Save interpretability trace
         self._save_trace_to_disk()
 
