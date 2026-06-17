@@ -8,7 +8,10 @@ from unittest.mock import patch
 
 import pytest
 
-from apo.core.llm_client import LLMUsage
+from apo.agents.critic import CriticAgent
+from apo.agents.tools import BatchPropertyPredictorTool, PropertyPredictorTool
+from apo.agents.worker import WorkerAgent
+from apo.core.llm_client import LLMUsage, aggregate_usage
 from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import ParetoHypervolume
 from apo.logging.run_logger import RunLogger
@@ -28,6 +31,21 @@ class MockSurrogate(SurrogatePredictor):
 
     def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
         return [1.0] * len(smiles_list)
+
+
+class StrictBatchSurrogate(SurrogatePredictor):
+    property_name = "StrictProp"
+    property_units = "units"
+    maximize = True
+
+    def __init__(self):
+        self.calls = []
+
+    def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
+        if isinstance(smiles_list, str):
+            raise TypeError("predict expects a list of SMILES, not a scalar string")
+        self.calls.append(list(smiles_list))
+        return [2.0] * len(smiles_list)
 
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
@@ -243,3 +261,90 @@ class TestFullPipelineSmoke:
         # Process a plain SMILES child (no [Cu]/[Au]) — should be valid
         candidate = inner._process_candidate("CCO", "reason", "CC", 1.0)
         assert candidate["valid"] is True, f"Expected valid: {candidate}"
+
+
+class TestAgenticRegressions:
+    def test_worker_agent_uses_scalar_safe_prediction_and_task_validation(self):
+        surrogate = StrictBatchSurrogate()
+        worker = WorkerAgent(
+            model="gemini/gemini-2.0-flash",
+            api_keys={},
+            task_context=POLYMER_CTX,
+            surrogate=surrogate,
+            parent_cache={},
+        )
+
+        candidates = worker._validate_candidates([
+            {
+                "parent_smiles": VALID_PARENT,
+                "child_smiles": VALID_CHILD,
+                "explanation": "valid polymer",
+            },
+            {
+                "parent_smiles": VALID_PARENT,
+                "child_smiles": "CCO",
+                "explanation": "missing required markers",
+            },
+        ])
+
+        assert candidates[0]["valid"] is True
+        assert candidates[0]["child_property"] == 2.0
+        assert candidates[0]["parent_property"] == 2.0
+        assert candidates[1]["valid"] is False
+        assert "Missing required marker" in candidates[1]["invalid_reason"]
+        assert all(isinstance(call, list) for call in surrogate.calls)
+
+    def test_agentic_property_tools_respect_predictor_batch_contract(self):
+        surrogate = StrictBatchSurrogate()
+
+        single = PropertyPredictorTool(surrogate, "StrictProp")
+        single_obs = single.execute("CCO")
+        assert single_obs.success is True
+        assert single_obs.result["StrictProp"] == 2.0
+
+        batch = BatchPropertyPredictorTool(surrogate, "StrictProp")
+        batch_obs = batch.execute(["CCO", "CCN"])
+        assert batch_obs.success is True
+        assert [r["property"] for r in batch_obs.result] == [2.0, 2.0]
+        assert surrogate.calls == [["CCO"], ["CCO", "CCN"]]
+
+    def test_aggregate_usage_accepts_nested_agent_summaries(self):
+        first = LLMUsage("worker-model", 10, 5, 0.25)
+        nested = aggregate_usage([LLMUsage("critic-model", 20, 10, 0.75)])
+
+        total = aggregate_usage([first, nested])
+
+        assert total["total_calls"] == 2
+        assert total["total_tokens"] == 45
+        assert total["by_model"]["worker-model"]["calls"] == 1
+        assert total["by_model"]["critic-model"]["tokens"] == 30
+
+    def test_critic_scores_evaluated_state_before_refinement(self):
+        critic = CriticAgent(
+            model="gemini/gemini-2.0-flash",
+            api_keys={},
+            task_context=POLYMER_CTX,
+            reward_fn=ParetoHypervolume(),
+        )
+        current = PromptState.seed("current strategy")
+        history = PromptStateHistory()
+        history.add(current)
+
+        def fake_run(initial_state):
+            critic.new_state = PromptState(
+                strategy_text="next strategy",
+                version=current.version + 1,
+                parent_version=current.version,
+            )
+            return critic.new_state, []
+
+        critic.run = fake_run
+        new_state, _, usage = critic.refine(
+            candidates=[{"valid": True, "improvement_factor": 2.0, "similarity": 0.5}],
+            current_state=current,
+            history=history,
+        )
+
+        assert current.score == 1.0
+        assert new_state.version == 1
+        assert usage["total_calls"] == 0

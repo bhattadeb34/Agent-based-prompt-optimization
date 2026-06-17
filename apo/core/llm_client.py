@@ -177,19 +177,60 @@ def _inject_api_keys(api_keys: Dict[str, str]) -> None:
 _inject_env_keys = _inject_api_keys
 
 
-def aggregate_usage(usages: List[LLMUsage]) -> Dict:
-    """Aggregate multiple LLMUsage objects into a summary dict."""
+def aggregate_usage(usages: List[Any]) -> Dict:
+    """Aggregate LLMUsage objects and already-aggregated usage summaries."""
     if not usages:
         return {"total_calls": 0, "total_tokens": 0, "total_latency_s": 0.0}
-    return {
-        "total_calls": len(usages),
-        "total_prompt_tokens": sum(u.prompt_tokens for u in usages),
-        "total_completion_tokens": sum(u.completion_tokens for u in usages),
-        "total_tokens": sum(u.total_tokens for u in usages),
-        "total_latency_s": round(sum(u.latency_s for u in usages), 3),
-        "avg_latency_s": round(sum(u.latency_s for u in usages) / len(usages), 3),
-        "by_model": _group_by_model(usages),
+
+    summary: Dict[str, Any] = {
+        "total_calls": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "total_tokens": 0,
+        "total_latency_s": 0.0,
+        "by_model": {},
     }
+    for usage in usages:
+        if not usage:
+            continue
+        if isinstance(usage, dict):
+            _merge_usage_summary(summary, usage)
+        else:
+            _add_usage(summary, usage)
+
+    summary["total_latency_s"] = round(summary["total_latency_s"], 3)
+    calls = summary["total_calls"]
+    summary["avg_latency_s"] = round(summary["total_latency_s"] / calls, 3) if calls else 0.0
+    return summary
+
+
+def _add_usage(summary: Dict[str, Any], usage: LLMUsage) -> None:
+    summary["total_calls"] += 1
+    summary["total_prompt_tokens"] += usage.prompt_tokens
+    summary["total_completion_tokens"] += usage.completion_tokens
+    summary["total_tokens"] += usage.total_tokens
+    summary["total_latency_s"] += usage.latency_s
+
+    by_model = summary.setdefault("by_model", {})
+    if usage.model not in by_model:
+        by_model[usage.model] = {"calls": 0, "tokens": 0}
+    by_model[usage.model]["calls"] += 1
+    by_model[usage.model]["tokens"] += usage.total_tokens
+
+
+def _merge_usage_summary(summary: Dict[str, Any], usage: Dict[str, Any]) -> None:
+    summary["total_calls"] += usage.get("total_calls", 0)
+    summary["total_prompt_tokens"] += usage.get("total_prompt_tokens", 0)
+    summary["total_completion_tokens"] += usage.get("total_completion_tokens", 0)
+    summary["total_tokens"] += usage.get("total_tokens", 0)
+    summary["total_latency_s"] += usage.get("total_latency_s", 0.0)
+
+    by_model = summary.setdefault("by_model", {})
+    for model, stats in usage.get("by_model", {}).items():
+        if model not in by_model:
+            by_model[model] = {"calls": 0, "tokens": 0}
+        by_model[model]["calls"] += stats.get("calls", 0)
+        by_model[model]["tokens"] += stats.get("tokens", 0)
 
 
 def _group_by_model(usages: List[LLMUsage]) -> Dict:
