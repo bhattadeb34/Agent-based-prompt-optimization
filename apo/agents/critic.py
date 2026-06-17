@@ -271,6 +271,9 @@ META ADVICE:
         self.steps = []
         self.all_usages = []
 
+        valid = [c for c in candidates if c.get("valid")]
+        current_state.score = self.reward_fn.compute(valid) if valid else 0.0
+
         print(f"\n[CriticAgent] Refining strategy v{current_state.version} → v{current_state.version + 1}")
 
         # Run ReAct loop

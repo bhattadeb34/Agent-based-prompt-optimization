@@ -12,10 +12,14 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .base import Observation, Tool
+from ..utils.smiles_utils import compute_similarity, validate_smiles
 
 
 class SMILESValidatorTool(Tool):
     """Validate SMILES strings using RDKit before sending to predictor."""
+
+    def __init__(self, required_markers: Optional[List[str]] = None):
+        self.required_markers = required_markers or []
 
     @property
     def name(self) -> str:
@@ -55,6 +59,15 @@ class SMILESValidatorTool(Tool):
 
         results = []
         for smi in smiles_list:
+            ok, reason = validate_smiles(smi, required_markers=self.required_markers)
+            if not ok:
+                results.append({
+                    "smiles": smi,
+                    "valid": False,
+                    "error": reason,
+                })
+                continue
+
             mol = Chem.MolFromSmiles(smi)
             if mol is None:
                 results.append({
@@ -164,6 +177,14 @@ class SMILESRepairTool(Tool):
 class SimilarityCalculatorTool(Tool):
     """Calculate structural similarity between molecules."""
 
+    def __init__(
+        self,
+        similarity_on_repeat_unit: bool = False,
+        marker_strip_tokens: Optional[List[str]] = None,
+    ):
+        self.similarity_on_repeat_unit = similarity_on_repeat_unit
+        self.marker_strip_tokens = marker_strip_tokens or []
+
     @property
     def name(self) -> str:
         return "calculate_similarity"
@@ -188,25 +209,21 @@ class SimilarityCalculatorTool(Tool):
 
     def execute(self, smiles1: str, smiles2: str) -> Observation:
         """Calculate Tanimoto similarity."""
-        try:
-            from rdkit import Chem, DataStructs
-            from rdkit.Chem import AllChem
-        except ImportError:
-            return Observation(success=False, result=None, error="RDKit not available")
-
-        mol1 = Chem.MolFromSmiles(smiles1)
-        mol2 = Chem.MolFromSmiles(smiles2)
-
-        if mol1 is None or mol2 is None:
+        ok1, reason1 = validate_smiles(smiles1)
+        ok2, reason2 = validate_smiles(smiles2)
+        if not ok1 or not ok2:
             return Observation(
                 success=False,
                 result=None,
-                error="One or both SMILES are invalid",
+                error=f"One or both SMILES are invalid: {reason1 or reason2}",
             )
 
-        fp1 = AllChem.GetMorganFingerprint(mol1, 2)
-        fp2 = AllChem.GetMorganFingerprint(mol2, 2)
-        similarity = DataStructs.TanimotoSimilarity(fp1, fp2)
+        similarity = compute_similarity(
+            smiles1,
+            smiles2,
+            similarity_on_repeat_unit=self.similarity_on_repeat_unit,
+            marker_strip_tokens=self.marker_strip_tokens,
+        )
 
         return Observation(
             success=True,
@@ -243,7 +260,7 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            value = self.surrogate.predict_single(smiles)
             if value is None:
                 return Observation(
                     success=False,
@@ -373,21 +390,25 @@ class BatchPropertyPredictorTool(Tool):
     def execute(self, smiles_list: List[str]) -> Observation:
         """Batch prediction."""
         results = []
-        for smi in smiles_list:
-            try:
-                value = self.surrogate.predict(smi)
-                results.append({
-                    "smiles": smi,
-                    "property": value,
-                    "valid": value is not None,
-                })
-            except Exception as e:
-                results.append({
-                    "smiles": smi,
-                    "property": None,
-                    "valid": False,
-                    "error": str(e),
-                })
+        try:
+            values = self.surrogate.predict(smiles_list)
+        except Exception as e:
+            values = [None] * len(smiles_list)
+            errors = [str(e)] * len(smiles_list)
+        else:
+            errors = [""] * len(smiles_list)
+
+        for i, smi in enumerate(smiles_list):
+            value = values[i] if i < len(values) else None
+            error = errors[i] if i < len(errors) else "Predictor returned too few results"
+            item = {
+                "smiles": smi,
+                "property": value,
+                "valid": value is not None,
+            }
+            if error:
+                item["error"] = error
+            results.append(item)
 
         n_valid = sum(1 for r in results if r["valid"])
         return Observation(
