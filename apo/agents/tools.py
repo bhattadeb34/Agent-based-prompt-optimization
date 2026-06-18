@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .base import Observation, Tool
+from ..utils.smiles_utils import compute_similarity
 
 
 class SMILESValidatorTool(Tool):
@@ -38,11 +39,17 @@ class SMILESValidatorTool(Tool):
                     "items": {"type": "string"},
                     "description": "List of SMILES strings to validate",
                 },
+                "required_markers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional substrings that must appear in every SMILES",
+                    "default": [],
+                },
             },
             "required": ["smiles_list"],
         }
 
-    def execute(self, smiles_list: List[str]) -> Observation:
+    def execute(self, smiles_list: List[str], required_markers: Optional[List[str]] = None) -> Observation:
         """Validate SMILES and return detailed results."""
         try:
             from rdkit import Chem
@@ -54,7 +61,17 @@ class SMILESValidatorTool(Tool):
             )
 
         results = []
+        required_markers = required_markers or []
         for smi in smiles_list:
+            missing = [marker for marker in required_markers if marker not in smi]
+            if missing:
+                results.append({
+                    "smiles": smi,
+                    "valid": False,
+                    "error": f"Missing required marker: {missing[0]}",
+                })
+                continue
+
             mol = Chem.MolFromSmiles(smi)
             if mol is None:
                 results.append({
@@ -182,15 +199,31 @@ class SimilarityCalculatorTool(Tool):
             "properties": {
                 "smiles1": {"type": "string", "description": "First SMILES"},
                 "smiles2": {"type": "string", "description": "Second SMILES"},
+                "similarity_on_repeat_unit": {
+                    "type": "boolean",
+                    "description": "Strip marker tokens before fingerprinting",
+                    "default": False,
+                },
+                "marker_strip_tokens": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tokens to strip before fingerprinting",
+                    "default": [],
+                },
             },
             "required": ["smiles1", "smiles2"],
         }
 
-    def execute(self, smiles1: str, smiles2: str) -> Observation:
+    def execute(
+        self,
+        smiles1: str,
+        smiles2: str,
+        similarity_on_repeat_unit: bool = False,
+        marker_strip_tokens: Optional[List[str]] = None,
+    ) -> Observation:
         """Calculate Tanimoto similarity."""
         try:
-            from rdkit import Chem, DataStructs
-            from rdkit.Chem import AllChem
+            from rdkit import Chem
         except ImportError:
             return Observation(success=False, result=None, error="RDKit not available")
 
@@ -204,9 +237,12 @@ class SimilarityCalculatorTool(Tool):
                 error="One or both SMILES are invalid",
             )
 
-        fp1 = AllChem.GetMorganFingerprint(mol1, 2)
-        fp2 = AllChem.GetMorganFingerprint(mol2, 2)
-        similarity = DataStructs.TanimotoSimilarity(fp1, fp2)
+        similarity = compute_similarity(
+            smiles1,
+            smiles2,
+            similarity_on_repeat_unit=similarity_on_repeat_unit,
+            marker_strip_tokens=marker_strip_tokens,
+        )
 
         return Observation(
             success=True,
@@ -243,7 +279,11 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            if hasattr(self.surrogate, "predict_single"):
+                value = self.surrogate.predict_single(smiles)
+            else:
+                values = self.surrogate.predict([smiles])
+                value = values[0] if values else None
             if value is None:
                 return Observation(
                     success=False,
@@ -373,21 +413,28 @@ class BatchPropertyPredictorTool(Tool):
     def execute(self, smiles_list: List[str]) -> Observation:
         """Batch prediction."""
         results = []
-        for smi in smiles_list:
-            try:
-                value = self.surrogate.predict(smi)
-                results.append({
-                    "smiles": smi,
-                    "property": value,
-                    "valid": value is not None,
-                })
-            except Exception as e:
-                results.append({
-                    "smiles": smi,
-                    "property": None,
-                    "valid": False,
-                    "error": str(e),
-                })
+        try:
+            predictions = self.surrogate.predict(smiles_list)
+        except Exception as e:
+            predictions = []
+            batch_error = str(e)
+
+        for i, smi in enumerate(smiles_list):
+            if i < len(predictions):
+                value = predictions[i]
+                error = None
+            else:
+                value = None
+                error = batch_error if "batch_error" in locals() else "missing prediction"
+
+            result = {
+                "smiles": smi,
+                "property": value,
+                "valid": value is not None,
+            }
+            if error:
+                result["error"] = error
+            results.append(result)
 
         n_valid = sum(1 for r in results if r["valid"])
         return Observation(

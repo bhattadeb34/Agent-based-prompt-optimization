@@ -273,8 +273,25 @@ META ADVICE:
 
         print(f"\n[CriticAgent] Refining strategy v{current_state.version} → v{current_state.version + 1}")
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = self.reward_fn.compute(valid_candidates)
+        current_state.score = reward
+
         # Run ReAct loop
         result, steps = self.run(initial_state="")
+
+        if self.new_state is None:
+            self.new_state = PromptState(
+                strategy_text=current_state.strategy_text,
+                version=current_state.version + 1,
+                rationale="Fallback: critic did not produce a parseable strategy",
+                parent_version=current_state.version,
+                model_used=self.model,
+            )
+        self.new_state.metadata.update({
+            "reward": reward,
+            "n_valid": len(valid_candidates),
+        })
 
         # Save interpretability trace
         self._save_trace_to_disk()
