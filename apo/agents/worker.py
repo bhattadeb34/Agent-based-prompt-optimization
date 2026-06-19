@@ -28,6 +28,7 @@ from .tools import (
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
+from ..utils.smiles_utils import canonicalize
 
 
 class WorkerAgent(ReActAgent):
@@ -76,9 +77,9 @@ class WorkerAgent(ReActAgent):
     def _init_tools(self) -> List[Tool]:
         """Tools available to Worker agent."""
         return [
-            SMILESValidatorTool(),
+            SMILESValidatorTool(required_markers=self.ctx.smiles_markers),
             SMILESRepairTool(),
-            SimilarityCalculatorTool(),
+            SimilarityCalculatorTool(task_context=self.ctx),
             ChemistryKnowledgeTool(),
             BatchPropertyPredictorTool(self.surrogate, self.ctx.property_name),
         ]
@@ -436,7 +437,7 @@ Return JSON (ONLY JSON, no other text):
 
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
                 except:
                     self.parent_cache[parent_smiles] = None
 
@@ -444,9 +445,25 @@ Return JSON (ONLY JSON, no other text):
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
-                    if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                    child_canonical = canonicalize(child_smiles) or child_smiles
+                    cand["child_smiles"] = child_canonical
+                    cand["child_property"] = self.surrogate.predict_single(child_canonical)
+                    if cand["child_property"] is None:
+                        cand["valid"] = False
+                        cand["invalid_reason"] = "Prediction returned None"
+                        cand["improvement_factor"] = 0.0
+                        cand["similarity"] = 0.0
+                        validated.append(cand)
+                        continue
+
+                    parent_property = cand["parent_property"]
+                    if parent_property and abs(parent_property) > 1e-15:
+                        if self.ctx.maximize:
+                            cand["improvement_factor"] = cand["child_property"] / parent_property
+                        elif abs(cand["child_property"]) > 1e-15:
+                            cand["improvement_factor"] = parent_property / cand["child_property"]
+                        else:
+                            cand["improvement_factor"] = 0.0
                     else:
                         cand["improvement_factor"] = 0.0
 
