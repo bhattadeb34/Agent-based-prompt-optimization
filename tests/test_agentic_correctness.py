@@ -10,6 +10,7 @@ from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import ParetoHypervolume
 from apo.surrogates.base import SurrogatePredictor
 from apo.task_context import TaskContext
+from apo.utils.smiles_utils import canonicalize
 
 
 VALID_PARENT = "CC(CO[Cu])CSCCOC(=O)[Au]"
@@ -27,7 +28,8 @@ class StrictBatchSurrogate(SurrogatePredictor):
     def predict(self, smiles_list: List[str]) -> List[Optional[float]]:
         assert isinstance(smiles_list, list), "predict() requires a list of SMILES"
         self.calls.append(smiles_list)
-        return [2.0 if smiles == VALID_CHILD else 1.0 for smiles in smiles_list]
+        valid_child_forms = {VALID_CHILD, canonicalize(VALID_CHILD)}
+        return [2.0 if smiles in valid_child_forms else 1.0 for smiles in smiles_list]
 
 
 def polymer_context() -> TaskContext:
