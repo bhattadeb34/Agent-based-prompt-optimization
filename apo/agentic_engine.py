@@ -25,6 +25,36 @@ from .surrogates.registry import get_surrogate
 from .task_context import TaskContext
 
 
+def _merge_usage_summary(target: Dict, summary: Optional[Dict]) -> Dict:
+    """Merge an aggregate usage summary dict into another summary dict."""
+    if not summary:
+        return target
+
+    for key in (
+        "total_calls",
+        "total_prompt_tokens",
+        "total_completion_tokens",
+        "total_tokens",
+        "total_latency_s",
+    ):
+        target[key] = target.get(key, 0) + summary.get(key, 0)
+
+    for model, stats in summary.get("by_model", {}).items():
+        model_stats = target.setdefault("by_model", {}).setdefault(
+            model,
+            {"calls": 0, "tokens": 0},
+        )
+        model_stats["calls"] += stats.get("calls", 0)
+        model_stats["tokens"] += stats.get("tokens", 0)
+
+    if target.get("total_calls"):
+        target["avg_latency_s"] = round(
+            target.get("total_latency_s", 0.0) / target["total_calls"],
+            3,
+        )
+    return target
+
+
 def run_agentic_mode(
     cfg: Dict,
     ctx: TaskContext,
@@ -53,7 +83,8 @@ def run_agentic_mode(
 
     # Reward function
     reward_name = opt_cfg.get("reward_function", "pareto_hypervolume")
-    reward_fn = get_reward_function(reward_name)
+    reward_kwargs = opt_cfg.get("reward_function_kwargs", {}) or {}
+    reward_fn = get_reward_function(reward_name, **reward_kwargs)
 
     # Initialize history
     history = PromptStateHistory()
@@ -100,6 +131,7 @@ def run_agentic_mode(
     print(f"[APO Agentic] Models: Worker={model_cfg['worker']}, Critic={model_cfg['critic']}, Meta={model_cfg['meta']}")
 
     all_usages: List[LLMUsage] = []
+    aggregate_usage_summaries: List[Dict] = []
     meta_advice = ""
 
     # Main optimization loop
@@ -129,22 +161,23 @@ def run_agentic_mode(
             history=history,
             meta_advice=meta_advice,
         )
-        all_usages.append(critic_usage)
+        if critic_usage:
+            aggregate_usage_summaries.append(critic_usage)
 
         print(f"[Critic] Refined strategy to v{new_state.version}")
 
         # Calculate reward
-        reward = new_state.score or 0.0
-        pareto_data = reward_fn.pareto_data([c for c in candidates if c.get("valid")])
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = reward_fn.compute(valid_candidates)
+        new_state.score = reward
+        pareto_data = reward_fn.pareto_data(valid_candidates)
 
         # Log epoch
         # critic_usage is already aggregated dict, worker_usages are LLMUsage objects
         all_usages_this_epoch = worker_usages.copy()
         epoch_usage = aggregate_usage(all_usages_this_epoch)
         # Manually merge critic_usage dict into epoch_usage
-        if critic_usage:
-            epoch_usage["total_calls"] = epoch_usage.get("total_calls", 0) + critic_usage.get("total_calls", 0)
-            epoch_usage["total_tokens"] = epoch_usage.get("total_tokens", 0) + critic_usage.get("total_tokens", 0)
+        _merge_usage_summary(epoch_usage, critic_usage)
 
         logger.log_epoch(
             epoch=epoch,
@@ -166,8 +199,7 @@ def run_agentic_mode(
             meta_advice, meta_usage = meta.get_advice(history, logger.reward_history)
             # meta_usage is also a dict (aggregated), not LLMUsage object
             if meta_usage and isinstance(meta_usage, dict):
-                # Can't append dict to list of LLMUsage, just track separately
-                pass
+                aggregate_usage_summaries.append(meta_usage)
             if meta_advice:
                 print(f"[Meta] Advice: {meta_advice[:200]}...")
                 logger.save_agent_trace(f"meta_epoch_{epoch}", meta._interpretability_trace)
@@ -179,6 +211,8 @@ def run_agentic_mode(
     # Final summary
     logger.save_prompt_history(history.to_list())
     total_usage = aggregate_usage(all_usages)
+    for usage_summary in aggregate_usage_summaries:
+        _merge_usage_summary(total_usage, usage_summary)
 
     print(f"\n{'='*70}")
     print("  AGENTIC OPTIMIZATION COMPLETE")
