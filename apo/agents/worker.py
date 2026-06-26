@@ -22,12 +22,12 @@ from .base import Action, Observation, ReActAgent, Thought, Tool
 from .tools import (
     BatchPropertyPredictorTool,
     ChemistryKnowledgeTool,
-    SimilarityCalculatorTool,
     SMILESRepairTool,
     SMILESValidatorTool,
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
+from ..utils.smiles_utils import canonicalize, compute_similarity, validate_smiles
 
 
 class WorkerAgent(ReActAgent):
@@ -78,7 +78,6 @@ class WorkerAgent(ReActAgent):
         return [
             SMILESValidatorTool(),
             SMILESRepairTool(),
-            SimilarityCalculatorTool(),
             ChemistryKnowledgeTool(),
             BatchPropertyPredictorTool(self.surrogate, self.ctx.property_name),
         ]
@@ -433,30 +432,68 @@ Return JSON (ONLY JSON, no other text):
             # Get parent and child properties
             parent_smiles = cand["parent_smiles"]
             child_smiles = cand["child_smiles"]
+            child_canonical = canonicalize(child_smiles)
+
+            ok, reason = validate_smiles(child_smiles, required_markers=self.ctx.smiles_markers)
+            if not ok:
+                cand["valid"] = False
+                cand["invalid_reason"] = reason
 
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
-                except:
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
+                except Exception:
                     self.parent_cache[parent_smiles] = None
 
             cand["parent_property"] = self.parent_cache.get(parent_smiles)
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
-                    if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                    if child_canonical is None:
+                        cand["valid"] = False
+                        cand["invalid_reason"] = "canonicalization failed"
+                        cand["child_property"] = None
+                        cand["improvement_factor"] = 0.0
+                        cand["similarity"] = 0.0
+                        validated.append(cand)
+                        continue
+
+                    cand["child_smiles"] = child_canonical
+                    cand["child_property"] = self.surrogate.predict_single(child_canonical)
+                    parent_property = cand["parent_property"]
+                    child_property = cand["child_property"]
+                    if child_property is None:
+                        cand["valid"] = False
+                        cand["invalid_reason"] = "surrogate returned None"
+                        cand["improvement_factor"] = 0.0
+                        cand["similarity"] = 0.0
+                        validated.append(cand)
+                        continue
+
+                    if (
+                        child_property is not None
+                        and parent_property is not None
+                        and abs(parent_property) > 1e-15
+                        and (self.ctx.maximize or abs(child_property) > 1e-15)
+                    ):
+                        improvement = (
+                            child_property / parent_property
+                            if self.ctx.maximize
+                            else parent_property / child_property
+                        )
+                        cand["improvement_factor"] = round(improvement, 6)
                     else:
                         cand["improvement_factor"] = 0.0
 
-                    # Calculate similarity
-                    sim_tool = next((t for t in self.tools if t.name == "calculate_similarity"), None)
-                    if sim_tool:
-                        sim_obs = sim_tool.execute(smiles1=parent_smiles, smiles2=child_smiles)
-                        cand["similarity"] = sim_obs.result.get("similarity", 0.0) if sim_obs.success else 0.0
-                    else:
-                        cand["similarity"] = 0.5  # Default
+                    cand["similarity"] = round(
+                        compute_similarity(
+                            child_canonical,
+                            parent_smiles,
+                            similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                            marker_strip_tokens=self.ctx.marker_strip_tokens,
+                        ),
+                        6,
+                    )
 
                 except Exception as e:
                     cand["valid"] = False

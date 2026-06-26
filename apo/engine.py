@@ -248,6 +248,7 @@ def _run_agent_mode(
     agent._current_state = current_state
 
     run_dir = agent.run()
+    logger.save_prompt_history(history.to_list())
     _print_summary(logger, history, agent.total_usage())
     return run_dir
 
