@@ -28,6 +28,7 @@ from .tools import (
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
+from ..utils.smiles_utils import validate_smiles
 
 
 class WorkerAgent(ReActAgent):
@@ -78,7 +79,10 @@ class WorkerAgent(ReActAgent):
         return [
             SMILESValidatorTool(),
             SMILESRepairTool(),
-            SimilarityCalculatorTool(),
+            SimilarityCalculatorTool(
+                similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                marker_strip_tokens=self.ctx.marker_strip_tokens,
+            ),
             ChemistryKnowledgeTool(),
             BatchPropertyPredictorTool(self.surrogate, self.ctx.property_name),
         ]
@@ -427,8 +431,16 @@ Return JSON (ONLY JSON, no other text):
         validated = []
         for i, (cand, val_result) in enumerate(zip(candidates_raw, validation_results)):
             cand["valid"] = val_result.get("valid", False)
+            if cand["valid"]:
+                marker_ok, marker_reason = validate_smiles(
+                    cand["child_smiles"],
+                    required_markers=self.ctx.smiles_markers,
+                )
+                cand["valid"] = marker_ok
+                if not marker_ok:
+                    cand["invalid_reason"] = marker_reason
             if not cand["valid"]:
-                cand["invalid_reason"] = val_result.get("error", "unknown")
+                cand["invalid_reason"] = cand.get("invalid_reason") or val_result.get("error", "unknown")
 
             # Get parent and child properties
             parent_smiles = cand["parent_smiles"]
@@ -436,7 +448,7 @@ Return JSON (ONLY JSON, no other text):
 
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
                 except:
                     self.parent_cache[parent_smiles] = None
 
@@ -444,9 +456,12 @@ Return JSON (ONLY JSON, no other text):
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
+                    cand["child_property"] = self.surrogate.predict_single(child_smiles)
                     if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                        if self.ctx.maximize:
+                            cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                        else:
+                            cand["improvement_factor"] = cand["parent_property"] / cand["child_property"]
                     else:
                         cand["improvement_factor"] = 0.0
 
