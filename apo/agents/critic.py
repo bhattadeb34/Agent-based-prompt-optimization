@@ -260,6 +260,10 @@ META ADVICE:
         Returns:
             (new_state, analysis, usage)
         """
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = self.reward_fn.compute(valid_candidates)
+        current_state.score = reward
+
         # Reset state
         self.candidates = candidates
         self.current_state = current_state
@@ -442,6 +446,7 @@ Return JSON:
                 rationale=selected["rationale"],
                 parent_version=self.current_state.version,
                 model_used=self.model,
+                metadata={"previous_reward": self.current_state.score},
             )
 
             return Thought(
@@ -457,6 +462,7 @@ Return JSON:
                 rationale="Fallback (JSON parse failed)",
                 parent_version=self.current_state.version,
                 model_used=self.model,
+                metadata={"previous_reward": self.current_state.score},
             )
             return Thought(content=text)
 
