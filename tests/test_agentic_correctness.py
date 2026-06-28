@@ -27,7 +27,7 @@ class StrictListSurrogate(SurrogatePredictor):
         if isinstance(smiles_list, str):
             raise TypeError("predict expects a list, not a string")
         self.calls.append(list(smiles_list))
-        return [2.0 if "COCCOC" in smi else 1.0 for smi in smiles_list]
+        return [1.0 if smi == PARENT else 2.0 for smi in smiles_list]
 
 
 def polymer_ctx() -> TaskContext:
