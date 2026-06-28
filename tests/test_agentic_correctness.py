@@ -27,7 +27,7 @@ class StrictListSurrogate(SurrogatePredictor):
         if isinstance(smiles_list, str):
             raise TypeError("predict expects a list, not a string")
         self.calls.append(list(smiles_list))
-        return [2.0 if smi == CHILD else 1.0 for smi in smiles_list]
+        return [2.0 if "COCCOC" in smi else 1.0 for smi in smiles_list]
 
 
 def polymer_ctx() -> TaskContext:
@@ -113,6 +113,7 @@ def test_agentic_engine_logs_evaluated_state_and_merges_usage(monkeypatch, tmp_p
     }
 
     def fake_generate(self, strategy, parent_smiles, n_per_molecule):
+        self._interpretability_trace = {"worker": "trace"}
         return ([{
             "parent_smiles": PARENT,
             "child_smiles": CHILD,
@@ -124,6 +125,7 @@ def test_agentic_engine_logs_evaluated_state_and_merges_usage(monkeypatch, tmp_p
         }], [usage])
 
     def fake_refine(self, candidates, current_state, history, meta_advice=""):
+        self._interpretability_trace = {"critic": "trace"}
         return (
             PromptState(
                 strategy_text="next strategy",
