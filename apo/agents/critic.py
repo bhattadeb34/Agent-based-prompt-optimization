@@ -279,6 +279,9 @@ META ADVICE:
         # Save interpretability trace
         self._save_trace_to_disk()
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        current_state.score = self.reward_fn.compute(valid_candidates)
+
         # Aggregate usage
         from ..core.llm_client import aggregate_usage
         total_usage = aggregate_usage(self.all_usages)
