@@ -273,6 +273,9 @@ META ADVICE:
 
         print(f"\n[CriticAgent] Refining strategy v{current_state.version} → v{current_state.version + 1}")
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        current_state.score = self.reward_fn.compute(valid_candidates)
+
         # Run ReAct loop
         result, steps = self.run(initial_state="")
 
@@ -437,16 +440,20 @@ Return JSON:
 
             # Create new state
             self.new_state = PromptState(
-                strategy_text=selected["strategy"],
+                strategy_text=selected.get("strategy") or self.current_state.strategy_text,
                 version=self.current_state.version + 1,
-                rationale=selected["rationale"],
+                rationale=selected.get("rationale", ""),
                 parent_version=self.current_state.version,
                 model_used=self.model,
             )
 
             return Thought(
-                content=f"Selected: {selected['name']}",
-                reasoning_steps=["Generated 3 alternatives", "Ran debate", f"Selected: {selected['name']}"],
+                content=f"Selected: {selected.get('name', 'strategy')}",
+                reasoning_steps=[
+                    "Generated alternatives",
+                    "Ran debate",
+                    f"Selected: {selected.get('name', 'strategy')}",
+                ],
                 confidence=selected.get("confidence", 0.8),
             )
         except json.JSONDecodeError:
@@ -462,7 +469,12 @@ Return JSON:
 
     def _run_debate(self, alternatives: Dict) -> Dict:
         """Run debate between top 2 alternatives."""
-        alt_list = [v for k, v in alternatives.items() if isinstance(v, dict)]
+        alt_list = [
+            self._normalise_alternative(v)
+            for v in alternatives.values()
+            if isinstance(v, dict)
+        ]
+        alt_list = [v for v in alt_list if v.get("strategy")]
         if len(alt_list) < 2:
             # Not enough alternatives, return first
             return alt_list[0] if alt_list else {"strategy": "fallback", "rationale": "no alternatives", "name": "fallback"}
@@ -515,6 +527,16 @@ Return JSON:
             }
 
         return selected
+
+    @staticmethod
+    def _normalise_alternative(alternative: Dict) -> Dict:
+        """Keep malformed LLM alternatives from crashing strategy selection."""
+        return {
+            "name": alternative.get("name", "strategy"),
+            "strategy": alternative.get("strategy", ""),
+            "rationale": alternative.get("rationale", ""),
+            "confidence": alternative.get("confidence", 0.8),
+        }
 
     def _save_trace_to_disk(self):
         """Save full interpretability trace."""
