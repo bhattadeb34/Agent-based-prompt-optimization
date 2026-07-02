@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Action, Observation, ReActAgent, Thought, Tool
@@ -28,6 +29,7 @@ from .tools import (
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
+from ..utils.smiles_utils import compute_similarity
 
 
 class WorkerAgent(ReActAgent):
@@ -76,9 +78,9 @@ class WorkerAgent(ReActAgent):
     def _init_tools(self) -> List[Tool]:
         """Tools available to Worker agent."""
         return [
-            SMILESValidatorTool(),
+            SMILESValidatorTool(self.ctx),
             SMILESRepairTool(),
-            SimilarityCalculatorTool(),
+            SimilarityCalculatorTool(self.ctx),
             ChemistryKnowledgeTool(),
             BatchPropertyPredictorTool(self.surrogate, self.ctx.property_name),
         ]
@@ -391,6 +393,7 @@ Return JSON (ONLY JSON, no other text):
 
         # Parse JSON
         try:
+            text = self._strip_json_fences(text)
             data = json.loads(text)
             candidates = []
             for parent_entry in data.get("generated_molecules", data.get("parent_smiles", [])):
@@ -436,7 +439,7 @@ Return JSON (ONLY JSON, no other text):
 
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
                 except:
                     self.parent_cache[parent_smiles] = None
 
@@ -444,19 +447,22 @@ Return JSON (ONLY JSON, no other text):
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
+                    cand["child_property"] = self.surrogate.predict_single(child_smiles)
                     if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                        if self.ctx.maximize:
+                            cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                        else:
+                            cand["improvement_factor"] = cand["parent_property"] / cand["child_property"]
                     else:
                         cand["improvement_factor"] = 0.0
 
                     # Calculate similarity
-                    sim_tool = next((t for t in self.tools if t.name == "calculate_similarity"), None)
-                    if sim_tool:
-                        sim_obs = sim_tool.execute(smiles1=parent_smiles, smiles2=child_smiles)
-                        cand["similarity"] = sim_obs.result.get("similarity", 0.0) if sim_obs.success else 0.0
-                    else:
-                        cand["similarity"] = 0.5  # Default
+                    cand["similarity"] = compute_similarity(
+                        parent_smiles,
+                        child_smiles,
+                        similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                        marker_strip_tokens=self.ctx.marker_strip_tokens,
+                    )
 
                 except Exception as e:
                     cand["valid"] = False
@@ -480,6 +486,15 @@ Return JSON (ONLY JSON, no other text):
             examples.append(f"{i}. {parent}")
 
         return "\n".join(examples)
+
+    @staticmethod
+    def _strip_json_fences(text: str) -> str:
+        """Strip markdown fences and surrounding prose from LLM JSON output."""
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text).strip()
+        return text
 
     def _save_trace_to_disk(self):
         """Save full interpretability trace to JSON."""
