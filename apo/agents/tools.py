@@ -12,10 +12,15 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .base import Observation, Tool
+from ..task_context import TaskContext
+from ..utils.smiles_utils import compute_similarity, validate_smiles
 
 
 class SMILESValidatorTool(Tool):
     """Validate SMILES strings using RDKit before sending to predictor."""
+
+    def __init__(self, task_context: Optional[TaskContext] = None):
+        self.ctx = task_context
 
     @property
     def name(self) -> str:
@@ -55,6 +60,18 @@ class SMILESValidatorTool(Tool):
 
         results = []
         for smi in smiles_list:
+            ok, reason = validate_smiles(
+                smi,
+                required_markers=self.ctx.smiles_markers if self.ctx else None,
+            )
+            if not ok:
+                results.append({
+                    "smiles": smi,
+                    "valid": False,
+                    "error": reason,
+                })
+                continue
+
             mol = Chem.MolFromSmiles(smi)
             if mol is None:
                 results.append({
@@ -164,6 +181,9 @@ class SMILESRepairTool(Tool):
 class SimilarityCalculatorTool(Tool):
     """Calculate structural similarity between molecules."""
 
+    def __init__(self, task_context: Optional[TaskContext] = None):
+        self.ctx = task_context
+
     @property
     def name(self) -> str:
         return "calculate_similarity"
@@ -204,9 +224,17 @@ class SimilarityCalculatorTool(Tool):
                 error="One or both SMILES are invalid",
             )
 
-        fp1 = AllChem.GetMorganFingerprint(mol1, 2)
-        fp2 = AllChem.GetMorganFingerprint(mol2, 2)
-        similarity = DataStructs.TanimotoSimilarity(fp1, fp2)
+        if self.ctx:
+            similarity = compute_similarity(
+                smiles1,
+                smiles2,
+                similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                marker_strip_tokens=self.ctx.marker_strip_tokens,
+            )
+        else:
+            fp1 = AllChem.GetMorganFingerprint(mol1, 2)
+            fp2 = AllChem.GetMorganFingerprint(mol2, 2)
+            similarity = DataStructs.TanimotoSimilarity(fp1, fp2)
 
         return Observation(
             success=True,
@@ -243,7 +271,7 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            value = self.surrogate.predict_single(smiles)
             if value is None:
                 return Observation(
                     success=False,
@@ -373,21 +401,31 @@ class BatchPropertyPredictorTool(Tool):
     def execute(self, smiles_list: List[str]) -> Observation:
         """Batch prediction."""
         results = []
-        for smi in smiles_list:
-            try:
-                value = self.surrogate.predict(smi)
-                results.append({
-                    "smiles": smi,
-                    "property": value,
-                    "valid": value is not None,
-                })
-            except Exception as e:
-                results.append({
-                    "smiles": smi,
-                    "property": None,
-                    "valid": False,
-                    "error": str(e),
-                })
+        try:
+            predictions = self.surrogate.predict(smiles_list)
+        except Exception as e:
+            return Observation(
+                success=False,
+                result=None,
+                error=f"Batch prediction failed: {str(e)}",
+            )
+
+        if len(predictions) != len(smiles_list):
+            return Observation(
+                success=False,
+                result=None,
+                error=(
+                    "Batch prediction returned "
+                    f"{len(predictions)} values for {len(smiles_list)} SMILES"
+                ),
+            )
+
+        for smi, value in zip(smiles_list, predictions):
+            results.append({
+                "smiles": smi,
+                "property": value,
+                "valid": value is not None,
+            })
 
         n_valid = sum(1 for r in results if r["valid"])
         return Observation(
