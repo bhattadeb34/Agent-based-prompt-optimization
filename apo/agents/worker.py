@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Action, Observation, ReActAgent, Thought, Tool
@@ -76,9 +77,12 @@ class WorkerAgent(ReActAgent):
     def _init_tools(self) -> List[Tool]:
         """Tools available to Worker agent."""
         return [
-            SMILESValidatorTool(),
+            SMILESValidatorTool(required_markers=self.ctx.smiles_markers),
             SMILESRepairTool(),
-            SimilarityCalculatorTool(),
+            SimilarityCalculatorTool(
+                similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                marker_strip_tokens=self.ctx.marker_strip_tokens,
+            ),
             ChemistryKnowledgeTool(),
             BatchPropertyPredictorTool(self.surrogate, self.ctx.property_name),
         ]
@@ -391,6 +395,9 @@ Return JSON (ONLY JSON, no other text):
 
         # Parse JSON
         try:
+            text = text.strip()
+            if "```" in text:
+                text = re.sub(r"```(?:json)?\n?", "", text).strip()
             data = json.loads(text)
             candidates = []
             for parent_entry in data.get("generated_molecules", data.get("parent_smiles", [])):
@@ -436,7 +443,7 @@ Return JSON (ONLY JSON, no other text):
 
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
                 except:
                     self.parent_cache[parent_smiles] = None
 
@@ -444,9 +451,12 @@ Return JSON (ONLY JSON, no other text):
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
+                    cand["child_property"] = self.surrogate.predict_single(child_smiles)
                     if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                        if self.ctx.maximize:
+                            cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                        else:
+                            cand["improvement_factor"] = cand["parent_property"] / cand["child_property"]
                     else:
                         cand["improvement_factor"] = 0.0
 
