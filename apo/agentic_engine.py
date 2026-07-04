@@ -144,7 +144,6 @@ def run_agentic_mode(
             parent_smiles=batch,
             n_per_molecule=n_per_mol,
         )
-        all_usages.extend(worker_usages)
 
         print(f"[Worker] Generated {len(candidates)} candidates, "
               f"{sum(1 for c in candidates if c.get('valid'))} valid")
