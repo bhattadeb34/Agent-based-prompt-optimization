@@ -12,6 +12,7 @@ from apo.task_context import TaskContext
 
 VALID_PARENT = "CC(CO[Cu])CSCCOC(=O)[Au]"
 VALID_CHILD = "CC(CO[Cu])COCCOC(=O)[Au]"
+CANONICAL_CHILD = "CC(C[O][Cu])COCCO[C](=O)[Au]"
 
 POLYMER_CTX = TaskContext(
     property_name="TestProp",
@@ -35,7 +36,7 @@ class StrictListSurrogate:
         if isinstance(smiles_list, str):
             raise AssertionError("predict() requires a list, not a scalar string")
         self.calls.append(list(smiles_list))
-        return [2.0 if smi == VALID_CHILD else 1.0 for smi in smiles_list]
+        return [2.0 if smi in {VALID_CHILD, CANONICAL_CHILD} else 1.0 for smi in smiles_list]
 
     def predict_single(self, smiles: str) -> Optional[float]:
         values = self.predict([smiles])
