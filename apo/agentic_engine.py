@@ -53,7 +53,8 @@ def run_agentic_mode(
 
     # Reward function
     reward_name = opt_cfg.get("reward_function", "pareto_hypervolume")
-    reward_fn = get_reward_function(reward_name)
+    reward_kwargs = opt_cfg.get("reward_function_kwargs", {}) or {}
+    reward_fn = get_reward_function(reward_name, **reward_kwargs)
 
     # Initialize history
     history = PromptStateHistory()
@@ -100,6 +101,7 @@ def run_agentic_mode(
     print(f"[APO Agentic] Models: Worker={model_cfg['worker']}, Critic={model_cfg['critic']}, Meta={model_cfg['meta']}")
 
     all_usages: List[LLMUsage] = []
+    aggregate_usages: List[Dict] = []
     meta_advice = ""
 
     # Main optimization loop
@@ -122,6 +124,11 @@ def run_agentic_mode(
         print(f"[Worker] Generated {len(candidates)} candidates, "
               f"{sum(1 for c in candidates if c.get('valid'))} valid")
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = reward_fn.compute(valid_candidates)
+        current_state.score = reward
+        pareto_data = reward_fn.pareto_data(valid_candidates)
+
         # Critic agent: Refine strategy
         new_state, analysis, critic_usage = critic.refine(
             candidates=candidates,
@@ -129,13 +136,10 @@ def run_agentic_mode(
             history=history,
             meta_advice=meta_advice,
         )
-        all_usages.append(critic_usage)
+        if critic_usage:
+            aggregate_usages.append(critic_usage)
 
         print(f"[Critic] Refined strategy to v{new_state.version}")
-
-        # Calculate reward
-        reward = new_state.score or 0.0
-        pareto_data = reward_fn.pareto_data([c for c in candidates if c.get("valid")])
 
         # Log epoch
         # critic_usage is already aggregated dict, worker_usages are LLMUsage objects
@@ -166,8 +170,7 @@ def run_agentic_mode(
             meta_advice, meta_usage = meta.get_advice(history, logger.reward_history)
             # meta_usage is also a dict (aggregated), not LLMUsage object
             if meta_usage and isinstance(meta_usage, dict):
-                # Can't append dict to list of LLMUsage, just track separately
-                pass
+                aggregate_usages.append(meta_usage)
             if meta_advice:
                 print(f"[Meta] Advice: {meta_advice[:200]}...")
                 logger.save_agent_trace(f"meta_epoch_{epoch}", meta._interpretability_trace)
@@ -179,6 +182,24 @@ def run_agentic_mode(
     # Final summary
     logger.save_prompt_history(history.to_list())
     total_usage = aggregate_usage(all_usages)
+    for usage in aggregate_usages:
+        total_usage["total_calls"] = total_usage.get("total_calls", 0) + usage.get("total_calls", 0)
+        total_usage["total_prompt_tokens"] = (
+            total_usage.get("total_prompt_tokens", 0) + usage.get("total_prompt_tokens", 0)
+        )
+        total_usage["total_completion_tokens"] = (
+            total_usage.get("total_completion_tokens", 0) + usage.get("total_completion_tokens", 0)
+        )
+        total_usage["total_tokens"] = total_usage.get("total_tokens", 0) + usage.get("total_tokens", 0)
+        total_usage["total_latency_s"] = round(
+            total_usage.get("total_latency_s", 0.0) + usage.get("total_latency_s", 0.0),
+            3,
+        )
+        for model, stats in usage.get("by_model", {}).items():
+            by_model = total_usage.setdefault("by_model", {})
+            model_stats = by_model.setdefault(model, {"calls": 0, "tokens": 0})
+            model_stats["calls"] += stats.get("calls", 0)
+            model_stats["tokens"] += stats.get("tokens", 0)
 
     print(f"\n{'='*70}")
     print("  AGENTIC OPTIMIZATION COMPLETE")
