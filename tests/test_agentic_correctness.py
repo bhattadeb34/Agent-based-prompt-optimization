@@ -12,10 +12,13 @@ from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import PropertyOnly
 from apo.surrogates.base import SurrogatePredictor
 from apo.task_context import TaskContext
+from apo.utils.smiles_utils import canonicalize
 
 
 VALID_PARENT = "CC(CO[Cu])CSCCOC(=O)[Au]"
 VALID_CHILD = "CC(CO[Cu])COCCOC(=O)[Au]"
+CANONICAL_PARENT = canonicalize(VALID_PARENT)
+CANONICAL_CHILD = canonicalize(VALID_CHILD)
 MISSING_MARKER_CHILD = "CCO"
 
 
@@ -45,7 +48,7 @@ POLYMER_CTX = TaskContext(
 
 
 def test_worker_uses_list_safe_predictions_and_required_markers():
-    surrogate = StrictSurrogate({VALID_PARENT: 2.0, VALID_CHILD: 4.0})
+    surrogate = StrictSurrogate({CANONICAL_PARENT: 2.0, CANONICAL_CHILD: 4.0})
     worker = WorkerAgent(
         model="test-model",
         api_keys={},
@@ -75,7 +78,7 @@ def test_worker_uses_list_safe_predictions_and_required_markers():
     assert 0.0 <= valid["similarity"] <= 1.0
     assert invalid["valid"] is False
     assert "Missing required marker" in invalid["invalid_reason"]
-    assert surrogate.calls == [[VALID_PARENT], [VALID_CHILD]]
+    assert surrogate.calls == [[CANONICAL_PARENT], [CANONICAL_CHILD]]
 
 
 def test_worker_improvement_honors_minimization_direction():
@@ -86,7 +89,7 @@ def test_worker_improvement_honors_minimization_direction():
         molecule_type="polymer",
         smiles_markers=["[Cu]", "[Au]"],
     )
-    surrogate = StrictSurrogate({VALID_PARENT: 10.0, VALID_CHILD: 5.0})
+    surrogate = StrictSurrogate({CANONICAL_PARENT: 10.0, CANONICAL_CHILD: 5.0})
     worker = WorkerAgent(
         model="test-model",
         api_keys={},
