@@ -74,7 +74,7 @@ def test_agentic_worker_enforces_task_markers():
 
     assert candidates[0]["valid"] is False
     assert "Missing required marker" in candidates[0]["invalid_reason"]
-    assert surrogate.calls == [["CC(CO[Cu])CSCCOC(=O)[Au]"]]
+    assert surrogate.calls == [["CC(C[O][Cu])CSCCO[C](=O)[Au]"]]
 
 
 def test_agentic_property_tools_do_not_pass_scalar_strings_to_predict():
