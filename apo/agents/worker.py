@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Action, Observation, ReActAgent, Thought, Tool
@@ -395,21 +396,56 @@ Return JSON (ONLY JSON, no other text):
 
         # Parse JSON
         try:
-            data = json.loads(text)
-            candidates = []
-            for parent_entry in data.get("generated_molecules", data.get("parent_smiles", [])):
-                parent = parent_entry.get("parent", "")
-                for cand in parent_entry.get("candidates", []):
-                    candidates.append({
-                        "parent_smiles": parent,
-                        "child_smiles": cand.get("smiles", ""),
-                        "explanation": cand.get("explanation", ""),
-                    })
-            return candidates
+            data = self._parse_generation_output(text)
+            return self._generation_data_to_candidates(data)
         except json.JSONDecodeError:
             # Fallback: try to extract SMILES from text
             print(f"[WorkerAgent] JSON parse failed, attempting text extraction")
             return []
+
+    @staticmethod
+    def _parse_generation_output(text: str) -> Dict:
+        """Parse worker JSON, accepting markdown fences around the object."""
+        text = text.strip()
+        if "```" in text:
+            text = re.sub(r"```(?:json)?\n?", "", text).strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            raise
+
+    @staticmethod
+    def _generation_data_to_candidates(data: Dict) -> List[Dict]:
+        """Normalize both agentic and inner-loop generation schemas."""
+        candidates = []
+        generated = data.get("generated_molecules")
+        if isinstance(generated, dict):
+            for parent, gen_dict in generated.items():
+                smiles_list = gen_dict.get("smiles", [])
+                reasoning_list = gen_dict.get("reasoning", [""] * len(smiles_list))
+                for child_smiles, reason in zip(smiles_list, reasoning_list):
+                    candidates.append({
+                        "parent_smiles": parent,
+                        "child_smiles": child_smiles,
+                        "explanation": reason,
+                    })
+            return candidates
+
+        parent_entries = generated if isinstance(generated, list) else data.get("parent_smiles", [])
+        for parent_entry in parent_entries:
+            if not isinstance(parent_entry, dict):
+                continue
+            parent = parent_entry.get("parent", "")
+            for cand in parent_entry.get("candidates", []):
+                candidates.append({
+                    "parent_smiles": parent,
+                    "child_smiles": cand.get("smiles", ""),
+                    "explanation": cand.get("explanation", ""),
+                })
+        return candidates
 
     def _validate_candidates(self, candidates_raw: List[Dict]) -> List[Dict]:
         """Validate candidates using RDKit and surrogate."""
