@@ -108,6 +108,48 @@ def test_worker_improvement_honors_minimization_direction():
     assert candidate["improvement_factor"] == 2.0
 
 
+def test_worker_parses_generated_molecules_dict_schema_with_fences():
+    text = f"""```json
+{{
+  "generated_molecules": {{
+    "{VALID_PARENT}": {{
+      "smiles": ["{VALID_CHILD}"],
+      "reasoning": ["kept required markers"]
+    }}
+  }}
+}}
+```"""
+
+    data = WorkerAgent._parse_generation_output(text)
+    candidates = WorkerAgent._generation_data_to_candidates(data)
+
+    assert candidates == [{
+        "parent_smiles": VALID_PARENT,
+        "child_smiles": VALID_CHILD,
+        "explanation": "kept required markers",
+    }]
+
+
+def test_worker_parses_parent_smiles_list_schema():
+    data = {
+        "parent_smiles": [{
+            "parent": VALID_PARENT,
+            "candidates": [{
+                "smiles": VALID_CHILD,
+                "explanation": "agentic schema",
+            }],
+        }],
+    }
+
+    candidates = WorkerAgent._generation_data_to_candidates(data)
+
+    assert candidates == [{
+        "parent_smiles": VALID_PARENT,
+        "child_smiles": VALID_CHILD,
+        "explanation": "agentic schema",
+    }]
+
+
 def test_property_tools_use_surrogate_list_api_correctly():
     surrogate = StrictSurrogate({"CC": 1.0, "CO": 2.0})
 

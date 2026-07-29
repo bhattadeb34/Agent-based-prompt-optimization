@@ -81,7 +81,8 @@ def run_agentic_mode(
 
     # Reward function
     reward_name = opt_cfg.get("reward_function", "pareto_hypervolume")
-    reward_fn = get_reward_function(reward_name)
+    reward_kwargs = opt_cfg.get("reward_function_kwargs", {})
+    reward_fn = get_reward_function(reward_name, **reward_kwargs)
 
     # Initialize history
     history = PromptStateHistory()
