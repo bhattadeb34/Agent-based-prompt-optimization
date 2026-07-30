@@ -9,6 +9,7 @@ from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.logging.run_logger import RunLogger
 from apo.surrogates.base import SurrogatePredictor
 from apo.task_context import TaskContext
+from apo.utils.smiles_utils import canonicalize
 
 
 VALID_PARENT = "CC(CO[Cu])CSCCOC(=O)[Au]"
@@ -28,7 +29,8 @@ class StrictListSurrogate(SurrogatePredictor):
         if not isinstance(smiles_list, list):
             raise TypeError("predict expects a list of SMILES")
         self.calls.append(list(smiles_list))
-        return [2.0 if smi == VALID_CHILD else 1.0 for smi in smiles_list]
+        canonical_child = canonicalize(VALID_CHILD)
+        return [2.0 if smi in {VALID_CHILD, canonical_child} else 1.0 for smi in smiles_list]
 
 
 def polymer_context(maximize: bool = True) -> TaskContext:
