@@ -12,6 +12,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .base import Observation, Tool
+from ..task_context import TaskContext
+from ..utils.smiles_utils import compute_similarity, validate_smiles
 
 
 class SMILESValidatorTool(Tool):
@@ -164,6 +166,9 @@ class SMILESRepairTool(Tool):
 class SimilarityCalculatorTool(Tool):
     """Calculate structural similarity between molecules."""
 
+    def __init__(self, task_context: Optional[TaskContext] = None):
+        self.ctx = task_context
+
     @property
     def name(self) -> str:
         return "calculate_similarity"
@@ -188,25 +193,21 @@ class SimilarityCalculatorTool(Tool):
 
     def execute(self, smiles1: str, smiles2: str) -> Observation:
         """Calculate Tanimoto similarity."""
-        try:
-            from rdkit import Chem, DataStructs
-            from rdkit.Chem import AllChem
-        except ImportError:
-            return Observation(success=False, result=None, error="RDKit not available")
-
-        mol1 = Chem.MolFromSmiles(smiles1)
-        mol2 = Chem.MolFromSmiles(smiles2)
-
-        if mol1 is None or mol2 is None:
+        ok1, _ = validate_smiles(smiles1)
+        ok2, _ = validate_smiles(smiles2)
+        if not ok1 or not ok2:
             return Observation(
                 success=False,
                 result=None,
                 error="One or both SMILES are invalid",
             )
 
-        fp1 = AllChem.GetMorganFingerprint(mol1, 2)
-        fp2 = AllChem.GetMorganFingerprint(mol2, 2)
-        similarity = DataStructs.TanimotoSimilarity(fp1, fp2)
+        similarity = compute_similarity(
+            smiles1,
+            smiles2,
+            similarity_on_repeat_unit=bool(self.ctx and self.ctx.similarity_on_repeat_unit),
+            marker_strip_tokens=self.ctx.marker_strip_tokens if self.ctx else None,
+        )
 
         return Observation(
             success=True,
@@ -243,7 +244,7 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            value = self.surrogate.predict_single(smiles)
             if value is None:
                 return Observation(
                     success=False,
@@ -372,22 +373,29 @@ class BatchPropertyPredictorTool(Tool):
 
     def execute(self, smiles_list: List[str]) -> Observation:
         """Batch prediction."""
+        try:
+            values = self.surrogate.predict(smiles_list)
+        except Exception as e:
+            return Observation(
+                success=False,
+                result=None,
+                error=f"Batch prediction failed: {str(e)}",
+            )
+
+        if len(values) != len(smiles_list):
+            return Observation(
+                success=False,
+                result=None,
+                error=f"Predictor returned {len(values)} results for {len(smiles_list)} SMILES",
+            )
+
         results = []
-        for smi in smiles_list:
-            try:
-                value = self.surrogate.predict(smi)
-                results.append({
-                    "smiles": smi,
-                    "property": value,
-                    "valid": value is not None,
-                })
-            except Exception as e:
-                results.append({
-                    "smiles": smi,
-                    "property": None,
-                    "valid": False,
-                    "error": str(e),
-                })
+        for smi, value in zip(smiles_list, values):
+            results.append({
+                "smiles": smi,
+                "property": value,
+                "valid": value is not None,
+            })
 
         n_valid = sum(1 for r in results if r["valid"])
         return Observation(
