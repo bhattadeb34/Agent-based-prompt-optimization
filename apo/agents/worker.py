@@ -28,6 +28,7 @@ from .tools import (
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
+from ..utils.smiles_utils import canonicalize, compute_similarity, validate_smiles
 
 
 class WorkerAgent(ReActAgent):
@@ -391,21 +392,53 @@ Return JSON (ONLY JSON, no other text):
 
         # Parse JSON
         try:
-            data = json.loads(text)
+            data = self._parse_json_response(text)
+            entries = data.get("generated_molecules", data.get("parent_smiles", []))
+            if isinstance(entries, dict):
+                entries = [
+                    {"parent": parent, "candidates": candidates}
+                    for parent, candidates in entries.items()
+                ]
+
             candidates = []
-            for parent_entry in data.get("generated_molecules", data.get("parent_smiles", [])):
+            for parent_entry in entries:
+                if not isinstance(parent_entry, dict):
+                    continue
                 parent = parent_entry.get("parent", "")
-                for cand in parent_entry.get("candidates", []):
+                raw_candidates = parent_entry.get("candidates", [])
+                if isinstance(raw_candidates, dict):
+                    raw_candidates = raw_candidates.get("smiles", [])
+                for cand in raw_candidates:
+                    if isinstance(cand, str):
+                        smiles = cand
+                        explanation = ""
+                    elif isinstance(cand, dict):
+                        smiles = cand.get("smiles", "")
+                        explanation = cand.get("explanation", "")
+                    else:
+                        continue
                     candidates.append({
                         "parent_smiles": parent,
-                        "child_smiles": cand.get("smiles", ""),
-                        "explanation": cand.get("explanation", ""),
+                        "child_smiles": smiles,
+                        "explanation": explanation,
                     })
             return candidates
         except json.JSONDecodeError:
             # Fallback: try to extract SMILES from text
             print(f"[WorkerAgent] JSON parse failed, attempting text extraction")
             return []
+
+    def _parse_json_response(self, text: str) -> Dict:
+        """Parse LLM JSON responses, including markdown-fenced JSON."""
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            if lines:
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            stripped = "\n".join(lines).strip()
+        return json.loads(stripped)
 
     def _validate_candidates(self, candidates_raw: List[Dict]) -> List[Dict]:
         """Validate candidates using RDKit and surrogate."""
@@ -419,7 +452,7 @@ Return JSON (ONLY JSON, no other text):
         # Extract SMILES
         smiles_list = [c["child_smiles"] for c in candidates_raw]
 
-        # Validate
+        # Validate RDKit syntax first; task-specific marker checks are applied below.
         obs = validator.execute(smiles_list=smiles_list)
         validation_results = obs.result if obs.success else []
 
@@ -434,29 +467,39 @@ Return JSON (ONLY JSON, no other text):
             parent_smiles = cand["parent_smiles"]
             child_smiles = cand["child_smiles"]
 
+            task_valid, task_error = validate_smiles(
+                child_smiles,
+                required_markers=self.ctx.smiles_markers,
+            )
+            if not task_valid:
+                cand["valid"] = False
+                cand["invalid_reason"] = task_error
+
+            canonical_child = canonicalize(child_smiles)
+            if cand["valid"] and canonical_child:
+                cand["child_smiles"] = canonical_child
+
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
-                except:
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
+                except Exception:
                     self.parent_cache[parent_smiles] = None
 
             cand["parent_property"] = self.parent_cache.get(parent_smiles)
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
-                    if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
-                    else:
-                        cand["improvement_factor"] = 0.0
-
-                    # Calculate similarity
-                    sim_tool = next((t for t in self.tools if t.name == "calculate_similarity"), None)
-                    if sim_tool:
-                        sim_obs = sim_tool.execute(smiles1=parent_smiles, smiles2=child_smiles)
-                        cand["similarity"] = sim_obs.result.get("similarity", 0.0) if sim_obs.success else 0.0
-                    else:
-                        cand["similarity"] = 0.5  # Default
+                    cand["child_property"] = self.surrogate.predict_single(cand["child_smiles"])
+                    cand["improvement_factor"] = self._compute_improvement_factor(
+                        cand["parent_property"],
+                        cand["child_property"],
+                    )
+                    cand["similarity"] = compute_similarity(
+                        parent_smiles,
+                        cand["child_smiles"],
+                        similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                        marker_strip_tokens=self.ctx.marker_strip_tokens,
+                    )
 
                 except Exception as e:
                     cand["valid"] = False
@@ -469,6 +512,21 @@ Return JSON (ONLY JSON, no other text):
             validated.append(cand)
 
         return validated
+
+    def _compute_improvement_factor(
+        self,
+        parent_property: Optional[float],
+        child_property: Optional[float],
+    ) -> float:
+        """Return a greater-is-better improvement factor for max or min tasks."""
+        if parent_property is None or child_property is None:
+            return 0.0
+
+        numerator = child_property if self.ctx.maximize else parent_property
+        denominator = parent_property if self.ctx.maximize else child_property
+        if denominator == 0:
+            return 0.0
+        return float(numerator / denominator)
 
     def _build_examples(self) -> str:
         """Build few-shot examples from parent SMILES."""
