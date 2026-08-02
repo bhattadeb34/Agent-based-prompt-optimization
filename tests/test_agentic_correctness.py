@@ -8,6 +8,7 @@ from apo.agents.worker import WorkerAgent
 from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.surrogates.base import SurrogatePredictor
 from apo.task_context import TaskContext
+from apo.utils.smiles_utils import canonicalize
 
 
 PARENT = "CC(CO[Cu])CSCCOC(=O)[Au]"
@@ -69,7 +70,7 @@ def test_worker_validation_rejects_markerless_polymer_and_scores_valid_child():
 
     assert candidates[0]["valid"] is True
     assert candidates[0]["parent_property"] == float(len(PARENT))
-    assert candidates[0]["child_property"] == float(len(CHILD))
+    assert candidates[0]["child_property"] == float(len(canonicalize(CHILD)))
     assert candidates[0]["improvement_factor"] > 0
     assert candidates[0]["similarity"] > 0
 
