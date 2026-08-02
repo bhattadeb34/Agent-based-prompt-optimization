@@ -243,7 +243,7 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            value = self.surrogate.predict_single(smiles)
             if value is None:
                 return Observation(
                     success=False,
@@ -373,21 +373,38 @@ class BatchPropertyPredictorTool(Tool):
     def execute(self, smiles_list: List[str]) -> Observation:
         """Batch prediction."""
         results = []
-        for smi in smiles_list:
-            try:
-                value = self.surrogate.predict(smi)
-                results.append({
-                    "smiles": smi,
-                    "property": value,
-                    "valid": value is not None,
-                })
-            except Exception as e:
+        prediction_error = None
+        try:
+            values = self.surrogate.predict(smiles_list)
+            if len(values) != len(smiles_list):
+                return Observation(
+                    success=False,
+                    result=None,
+                    error=(
+                        f"Prediction count mismatch: got {len(values)} values "
+                        f"for {len(smiles_list)} SMILES"
+                    ),
+                )
+        except Exception as e:
+            prediction_error = str(e)
+            values = None
+
+        for i, smi in enumerate(smiles_list):
+            if values is None:
                 results.append({
                     "smiles": smi,
                     "property": None,
                     "valid": False,
-                    "error": str(e),
+                    "error": prediction_error or "prediction failed",
                 })
+                continue
+
+            value = values[i]
+            results.append({
+                "smiles": smi,
+                "property": value,
+                "valid": value is not None,
+            })
 
         n_valid = sum(1 for r in results if r["valid"])
         return Observation(
