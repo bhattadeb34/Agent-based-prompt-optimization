@@ -129,26 +129,6 @@ def test_worker_uses_minimization_direction_for_improvement():
 
 
 def test_critic_scores_evaluated_current_state_before_returning_new_strategy(monkeypatch):
-    responses = iter([
-        json.dumps({
-            "pareto_insights": ["good"],
-            "failure_patterns": [],
-            "unexplored_space": [],
-            "tradeoffs": "none",
-            "confidence": 0.9,
-        }),
-        json.dumps({
-            "alternative_1": {"name": "A", "strategy": "strategy A", "rationale": "why A"},
-            "alternative_2": {"name": "B", "strategy": "strategy B", "rationale": "why B"},
-        }),
-        json.dumps({
-            "consensus": "A",
-            "consensus_rationale": "best",
-            "confidence": 0.8,
-        }),
-    ])
-    monkeypatch.setattr("apo.agents.critic.call_llm", lambda **kwargs: (next(responses), usage()))
-
     current = PromptState.seed("seed")
     history = PromptStateHistory()
     history.add(current)
@@ -158,6 +138,20 @@ def test_critic_scores_evaluated_current_state_before_returning_new_strategy(mon
         task_context=polymer_ctx(),
         reward_fn=ParetoHypervolume(),
     )
+
+    def fake_run(initial_state):
+        critic.new_state = PromptState(
+            strategy_text="strategy A",
+            version=current.version + 1,
+            rationale="test",
+            parent_version=current.version,
+            model_used=critic.model,
+        )
+        critic.analysis = {"pareto_insights": ["good"]}
+        critic.all_usages = [usage()]
+        return (critic.new_state, critic.analysis), []
+
+    monkeypatch.setattr(critic, "run", fake_run)
 
     new_state, _, critic_usage = critic.refine(
         candidates=[{
@@ -174,7 +168,7 @@ def test_critic_scores_evaluated_current_state_before_returning_new_strategy(mon
 
     assert current.score == 1.0
     assert new_state.version == 1
-    assert critic_usage["total_calls"] == 3
+    assert critic_usage["total_calls"] == 1
 
 
 def test_meta_formats_recent_strategies_from_prompt_history():
