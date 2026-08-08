@@ -260,6 +260,9 @@ META ADVICE:
         Returns:
             (new_state, analysis, usage)
         """
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        current_state.score = self.reward_fn.compute(valid_candidates)
+
         # Reset state
         self.candidates = candidates
         self.current_state = current_state
