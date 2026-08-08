@@ -243,7 +243,7 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            value = self.surrogate.predict_single(smiles)
             if value is None:
                 return Observation(
                     success=False,
@@ -373,20 +373,28 @@ class BatchPropertyPredictorTool(Tool):
     def execute(self, smiles_list: List[str]) -> Observation:
         """Batch prediction."""
         results = []
-        for smi in smiles_list:
-            try:
-                value = self.surrogate.predict(smi)
+        try:
+            values = self.surrogate.predict(smiles_list)
+        except Exception as e:
+            values = []
+            batch_error = str(e)
+        else:
+            batch_error = ""
+
+        for i, smi in enumerate(smiles_list):
+            if i < len(values):
+                value = values[i]
                 results.append({
                     "smiles": smi,
                     "property": value,
                     "valid": value is not None,
                 })
-            except Exception as e:
+            else:
                 results.append({
                     "smiles": smi,
                     "property": None,
                     "valid": False,
-                    "error": str(e),
+                    "error": batch_error or "missing batch prediction",
                 })
 
         n_valid = sum(1 for r in results if r["valid"])
