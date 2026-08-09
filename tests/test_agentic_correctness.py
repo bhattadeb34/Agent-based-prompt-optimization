@@ -35,7 +35,7 @@ class StrictSurrogate(SurrogatePredictor):
         self.predict_calls.append(list(smiles_list))
         values = []
         for smi in smiles_list:
-            values.append(2.0 if "COCCOC" in smi and "CSCCOC" not in smi else 1.0)
+            values.append(2.0 if "COCCO" in smi and "CSCCO" not in smi else 1.0)
         return values
 
 
