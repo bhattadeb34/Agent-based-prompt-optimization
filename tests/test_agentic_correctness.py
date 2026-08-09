@@ -35,7 +35,7 @@ class StrictSurrogate(SurrogatePredictor):
         self.predict_calls.append(list(smiles_list))
         values = []
         for smi in smiles_list:
-            values.append(2.0 if smi == VALID_CHILD else 1.0)
+            values.append(2.0 if "COCCOC" in smi and "CSCCOC" not in smi else 1.0)
         return values
 
 
@@ -124,6 +124,7 @@ def test_run_agentic_mode_logs_evaluated_state_and_merges_usage(monkeypatch, tmp
         return StrictSurrogate()
 
     def fake_generate(self, strategy, parent_smiles, n_per_molecule=4):
+        self._interpretability_trace = {"steps": []}
         return [
             {
                 "parent_smiles": VALID_PARENT,
@@ -137,6 +138,7 @@ def test_run_agentic_mode_logs_evaluated_state_and_merges_usage(monkeypatch, tmp
         ], [LLMUsage("worker-model", 10, 5, 0.1)]
 
     def fake_refine(self, candidates, current_state, history, meta_advice=""):
+        self._interpretability_trace = {"steps": []}
         current_state.score = self.reward_fn.compute([c for c in candidates if c.get("valid")])
         return (
             PromptState(
