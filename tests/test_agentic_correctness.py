@@ -8,6 +8,7 @@ from apo.agents.worker import WorkerAgent
 from apo.core.llm_client import LLMUsage
 from apo.surrogates.base import SurrogatePredictor
 from apo.task_context import TaskContext
+from apo.utils.smiles_utils import canonicalize
 
 
 class StrictSurrogate(SurrogatePredictor):
@@ -63,7 +64,10 @@ def test_agentic_property_tools_use_surrogate_list_api():
 
 
 def test_worker_validation_uses_predict_single_and_task_marker_rules():
-    surrogate = StrictSurrogate({VALID_PARENT: 1.0, VALID_CHILD: 2.0})
+    surrogate = StrictSurrogate({
+        canonicalize(VALID_PARENT): 1.0,
+        canonicalize(VALID_CHILD): 2.0,
+    })
     worker = WorkerAgent(
         model="test-model",
         api_keys={},

@@ -468,10 +468,22 @@ Return JSON (ONLY JSON, no other text):
                 try:
                     cand["child_smiles"] = child_smiles
                     cand["child_property"] = self.surrogate.predict_single(child_smiles)
+                    if cand["parent_property"] is None:
+                        cand["valid"] = False
+                        cand["invalid_reason"] = "parent surrogate returned None"
+                        cand["improvement_factor"] = 0.0
+                        cand["similarity"] = 0.0
+                        validated.append(cand)
+                        continue
+                    if cand["child_property"] is None:
+                        cand["valid"] = False
+                        cand["invalid_reason"] = "surrogate returned None"
+                        cand["improvement_factor"] = 0.0
+                        cand["similarity"] = 0.0
+                        validated.append(cand)
+                        continue
                     if (
-                        cand["child_property"] is not None
-                        and cand["parent_property"] is not None
-                        and abs(cand["parent_property"]) > 1e-15
+                        abs(cand["parent_property"]) > 1e-15
                         and (self.ctx.maximize or abs(cand["child_property"]) > 1e-15)
                     ):
                         if self.ctx.maximize:
