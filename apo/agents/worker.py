@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Action, Observation, ReActAgent, Thought, Tool
@@ -28,6 +29,7 @@ from .tools import (
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
+from ..utils.smiles_utils import canonicalize, compute_similarity, validate_smiles
 
 
 class WorkerAgent(ReActAgent):
@@ -391,16 +393,31 @@ Return JSON (ONLY JSON, no other text):
 
         # Parse JSON
         try:
+            text = self._strip_json_fences(text)
             data = json.loads(text)
             candidates = []
-            for parent_entry in data.get("generated_molecules", data.get("parent_smiles", [])):
-                parent = parent_entry.get("parent", "")
-                for cand in parent_entry.get("candidates", []):
-                    candidates.append({
-                        "parent_smiles": parent,
-                        "child_smiles": cand.get("smiles", ""),
-                        "explanation": cand.get("explanation", ""),
-                    })
+            generated = data.get("generated_molecules", data.get("parent_smiles", []))
+            if isinstance(generated, dict):
+                for parent, gen_dict in generated.items():
+                    smiles_list = gen_dict.get("smiles", []) if isinstance(gen_dict, dict) else []
+                    reasoning_list = gen_dict.get("reasoning", [""] * len(smiles_list)) if isinstance(gen_dict, dict) else []
+                    for child_smiles, reason in zip(smiles_list, reasoning_list):
+                        candidates.append({
+                            "parent_smiles": parent,
+                            "child_smiles": child_smiles,
+                            "explanation": reason,
+                        })
+            elif isinstance(generated, list):
+                for parent_entry in generated:
+                    if not isinstance(parent_entry, dict):
+                        continue
+                    parent = parent_entry.get("parent", "")
+                    for cand in parent_entry.get("candidates", []):
+                        candidates.append({
+                            "parent_smiles": parent,
+                            "child_smiles": cand.get("smiles", ""),
+                            "explanation": cand.get("explanation", ""),
+                        })
             return candidates
         except json.JSONDecodeError:
             # Fallback: try to extract SMILES from text
@@ -416,12 +433,16 @@ Return JSON (ONLY JSON, no other text):
                 c["valid"] = True
             return candidates_raw
 
-        # Extract SMILES
-        smiles_list = [c["child_smiles"] for c in candidates_raw]
-
-        # Validate
-        obs = validator.execute(smiles_list=smiles_list)
-        validation_results = obs.result if obs.success else []
+        validation_results = []
+        for cand in candidates_raw:
+            child_smiles = cand.get("child_smiles", "")
+            ok, reason = validate_smiles(child_smiles, required_markers=self.ctx.smiles_markers)
+            canonical = canonicalize(child_smiles) if ok else None
+            validation_results.append({
+                "valid": bool(ok and canonical),
+                "canonical": canonical,
+                "error": reason if not ok else "canonicalization failed",
+            })
 
         # Merge validation results back
         validated = []
@@ -431,32 +452,42 @@ Return JSON (ONLY JSON, no other text):
                 cand["invalid_reason"] = val_result.get("error", "unknown")
 
             # Get parent and child properties
-            parent_smiles = cand["parent_smiles"]
-            child_smiles = cand["child_smiles"]
+            parent_smiles = canonicalize(cand["parent_smiles"]) or cand["parent_smiles"]
+            child_smiles = val_result.get("canonical") or cand["child_smiles"]
+            cand["parent_smiles"] = parent_smiles
 
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
-                except:
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
+                except Exception:
                     self.parent_cache[parent_smiles] = None
 
             cand["parent_property"] = self.parent_cache.get(parent_smiles)
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
-                    if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                    cand["child_smiles"] = child_smiles
+                    cand["child_property"] = self.surrogate.predict_single(child_smiles)
+                    if (
+                        cand["child_property"] is not None
+                        and cand["parent_property"] is not None
+                        and abs(cand["parent_property"]) > 1e-15
+                        and (self.ctx.maximize or abs(cand["child_property"]) > 1e-15)
+                    ):
+                        if self.ctx.maximize:
+                            improvement = cand["child_property"] / cand["parent_property"]
+                        else:
+                            improvement = cand["parent_property"] / cand["child_property"]
+                        cand["improvement_factor"] = round(improvement, 6)
                     else:
                         cand["improvement_factor"] = 0.0
 
-                    # Calculate similarity
-                    sim_tool = next((t for t in self.tools if t.name == "calculate_similarity"), None)
-                    if sim_tool:
-                        sim_obs = sim_tool.execute(smiles1=parent_smiles, smiles2=child_smiles)
-                        cand["similarity"] = sim_obs.result.get("similarity", 0.0) if sim_obs.success else 0.0
-                    else:
-                        cand["similarity"] = 0.5  # Default
+                    cand["similarity"] = round(compute_similarity(
+                        child_smiles,
+                        parent_smiles,
+                        similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                        marker_strip_tokens=self.ctx.marker_strip_tokens,
+                    ), 6)
 
                 except Exception as e:
                     cand["valid"] = False
@@ -469,6 +500,13 @@ Return JSON (ONLY JSON, no other text):
             validated.append(cand)
 
         return validated
+
+    @staticmethod
+    def _strip_json_fences(text: str) -> str:
+        text = text.strip()
+        if "```" in text:
+            text = re.sub(r"```(?:json)?\n?", "", text).strip()
+        return text
 
     def _build_examples(self) -> str:
         """Build few-shot examples from parent SMILES."""

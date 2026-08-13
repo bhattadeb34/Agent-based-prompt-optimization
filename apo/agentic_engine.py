@@ -53,7 +53,8 @@ def run_agentic_mode(
 
     # Reward function
     reward_name = opt_cfg.get("reward_function", "pareto_hypervolume")
-    reward_fn = get_reward_function(reward_name)
+    reward_kwargs = opt_cfg.get("reward_function_kwargs", {}) or {}
+    reward_fn = get_reward_function(reward_name, **reward_kwargs)
 
     # Initialize history
     history = PromptStateHistory()
@@ -99,7 +100,7 @@ def run_agentic_mode(
     print(f"[APO Agentic] Config: {n_epochs} epochs, {n_per_mol} candidates/parent, batch={batch_size}")
     print(f"[APO Agentic] Models: Worker={model_cfg['worker']}, Critic={model_cfg['critic']}, Meta={model_cfg['meta']}")
 
-    all_usages: List[LLMUsage] = []
+    total_usage = {"total_calls": 0, "total_tokens": 0, "total_latency_s": 0.0, "by_model": {}}
     meta_advice = ""
 
     # Main optimization loop
@@ -117,7 +118,7 @@ def run_agentic_mode(
             parent_smiles=batch,
             n_per_molecule=n_per_mol,
         )
-        all_usages.extend(worker_usages)
+        total_usage = _merge_usage_summaries(total_usage, aggregate_usage(worker_usages))
 
         print(f"[Worker] Generated {len(candidates)} candidates, "
               f"{sum(1 for c in candidates if c.get('valid'))} valid")
@@ -129,22 +130,20 @@ def run_agentic_mode(
             history=history,
             meta_advice=meta_advice,
         )
-        all_usages.append(critic_usage)
+        total_usage = _merge_usage_summaries(total_usage, critic_usage)
 
         print(f"[Critic] Refined strategy to v{new_state.version}")
 
         # Calculate reward
-        reward = new_state.score or 0.0
-        pareto_data = reward_fn.pareto_data([c for c in candidates if c.get("valid")])
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = reward_fn.compute(valid_candidates)
+        current_state.score = reward
+        new_state.score = reward
+        pareto_data = reward_fn.pareto_data(valid_candidates)
 
         # Log epoch
         # critic_usage is already aggregated dict, worker_usages are LLMUsage objects
-        all_usages_this_epoch = worker_usages.copy()
-        epoch_usage = aggregate_usage(all_usages_this_epoch)
-        # Manually merge critic_usage dict into epoch_usage
-        if critic_usage:
-            epoch_usage["total_calls"] = epoch_usage.get("total_calls", 0) + critic_usage.get("total_calls", 0)
-            epoch_usage["total_tokens"] = epoch_usage.get("total_tokens", 0) + critic_usage.get("total_tokens", 0)
+        epoch_usage = _merge_usage_summaries(aggregate_usage(worker_usages), critic_usage)
 
         logger.log_epoch(
             epoch=epoch,
@@ -166,8 +165,7 @@ def run_agentic_mode(
             meta_advice, meta_usage = meta.get_advice(history, logger.reward_history)
             # meta_usage is also a dict (aggregated), not LLMUsage object
             if meta_usage and isinstance(meta_usage, dict):
-                # Can't append dict to list of LLMUsage, just track separately
-                pass
+                total_usage = _merge_usage_summaries(total_usage, meta_usage)
             if meta_advice:
                 print(f"[Meta] Advice: {meta_advice[:200]}...")
                 logger.save_agent_trace(f"meta_epoch_{epoch}", meta._interpretability_trace)
@@ -178,7 +176,6 @@ def run_agentic_mode(
 
     # Final summary
     logger.save_prompt_history(history.to_list())
-    total_usage = aggregate_usage(all_usages)
 
     print(f"\n{'='*70}")
     print("  AGENTIC OPTIMIZATION COMPLETE")
@@ -194,3 +191,29 @@ def run_agentic_mode(
         print(f"    [{model}] {stats['calls']} calls, {stats['tokens']:,} tokens")
 
     return str(logger.run_dir)
+
+
+def _merge_usage_summaries(left: Dict, right: Optional[Dict]) -> Dict:
+    """Merge aggregate_usage-style dictionaries without mixing them with LLMUsage objects."""
+    if not right:
+        return dict(left)
+
+    merged = dict(left)
+    for key in ("total_calls", "total_prompt_tokens", "total_completion_tokens", "total_tokens"):
+        merged[key] = merged.get(key, 0) + right.get(key, 0)
+    merged["total_latency_s"] = round(
+        merged.get("total_latency_s", 0.0) + right.get("total_latency_s", 0.0),
+        3,
+    )
+    total_calls = merged.get("total_calls", 0)
+    if total_calls:
+        merged["avg_latency_s"] = round(merged.get("total_latency_s", 0.0) / total_calls, 3)
+
+    by_model = {model: dict(stats) for model, stats in merged.get("by_model", {}).items()}
+    for model, stats in right.get("by_model", {}).items():
+        slot = by_model.setdefault(model, {"calls": 0, "tokens": 0})
+        slot["calls"] += stats.get("calls", 0)
+        slot["tokens"] += stats.get("tokens", 0)
+    if by_model:
+        merged["by_model"] = by_model
+    return merged
