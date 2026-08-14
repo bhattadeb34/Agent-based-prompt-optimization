@@ -78,7 +78,7 @@ def test_agentic_worker_uses_list_safe_predictions_and_marker_validation():
     assert isinstance(valid["child_property"], float)
     assert invalid["valid"] is False
     assert "Missing required marker" in invalid["invalid_reason"]
-    assert surrogate.calls == [[VALID_PARENT], [VALID_CHILD]]
+    assert surrogate.calls == [[VALID_PARENT], [canonicalize(VALID_CHILD)]]
 
 
 def test_agentic_worker_parses_fenced_generated_molecules_mapping():
