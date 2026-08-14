@@ -8,6 +8,7 @@ from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.core.reward import ParetoHypervolume
 from apo.surrogates.base import SurrogatePredictor
 from apo.task_context import TaskContext
+from apo.utils.smiles_utils import canonicalize
 
 
 VALID_PARENT = "CC(CO[Cu])CSCCOC(=O)[Au]"
@@ -28,7 +29,9 @@ class StrictSurrogate(SurrogatePredictor):
         self.calls.append(list(smiles_list))
         values = {
             VALID_PARENT: 1.0,
+            canonicalize(VALID_PARENT): 1.0,
             VALID_CHILD: 2.0,
+            canonicalize(VALID_CHILD): 2.0,
             MISSING_MARKER_CHILD: 3.0,
         }
         return [values.get(smiles, 1.5) for smiles in smiles_list]
