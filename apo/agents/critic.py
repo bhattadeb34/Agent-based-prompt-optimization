@@ -271,6 +271,11 @@ META ADVICE:
         self.steps = []
         self.all_usages = []
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        reward = self.reward_fn.compute(valid_candidates)
+        current_state.score = reward
+        pareto_data = self.reward_fn.pareto_data(valid_candidates)
+
         print(f"\n[CriticAgent] Refining strategy v{current_state.version} → v{current_state.version + 1}")
 
         # Run ReAct loop
@@ -282,6 +287,20 @@ META ADVICE:
         # Aggregate usage
         from ..core.llm_client import aggregate_usage
         total_usage = aggregate_usage(self.all_usages)
+
+        if self.new_state is None:
+            self.new_state = PromptState(
+                strategy_text=current_state.strategy_text,
+                version=current_state.version + 1,
+                rationale="Fallback: critic did not produce a new strategy",
+                parent_version=current_state.version,
+                model_used=self.model,
+            )
+        self.new_state.metadata.update({
+            "reward": reward,
+            "pareto_hypervolume": pareto_data.get("hypervolume", 0.0),
+            "n_valid": len(valid_candidates),
+        })
 
         return self.new_state, self.analysis, total_usage
 
