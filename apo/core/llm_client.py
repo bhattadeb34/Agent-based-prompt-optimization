@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import litellm
 from litellm import completion
@@ -177,18 +177,46 @@ def _inject_api_keys(api_keys: Dict[str, str]) -> None:
 _inject_env_keys = _inject_api_keys
 
 
-def aggregate_usage(usages: List[LLMUsage]) -> Dict:
-    """Aggregate multiple LLMUsage objects into a summary dict."""
+def aggregate_usage(usages: List[Union[LLMUsage, Dict]]) -> Dict:
+    """Aggregate LLMUsage objects and already-aggregated usage summaries."""
     if not usages:
         return {"total_calls": 0, "total_tokens": 0, "total_latency_s": 0.0}
+
+    llm_usages = [u for u in usages if isinstance(u, LLMUsage)]
+    summary_usages = [u for u in usages if isinstance(u, dict)]
+
+    total_calls = len(llm_usages)
+    total_prompt_tokens = sum(u.prompt_tokens for u in llm_usages)
+    total_completion_tokens = sum(u.completion_tokens for u in llm_usages)
+    total_tokens = sum(u.total_tokens for u in llm_usages)
+    total_latency = sum(u.latency_s for u in llm_usages)
+    by_model = _group_by_model(llm_usages)
+
+    for summary in summary_usages:
+        total_calls += summary.get("total_calls", 0)
+        total_prompt_tokens += summary.get("total_prompt_tokens", 0)
+        total_completion_tokens += summary.get("total_completion_tokens", 0)
+        total_tokens += summary.get("total_tokens", 0)
+        total_latency += summary.get("total_latency_s", 0.0)
+        for model, stats in summary.get("by_model", {}).items():
+            if model not in by_model:
+                by_model[model] = {"calls": 0, "tokens": 0}
+            by_model[model]["calls"] += stats.get("calls", 0)
+            by_model[model]["tokens"] += stats.get("tokens", 0)
+
+    if total_calls == 0:
+        avg_latency = 0.0
+    else:
+        avg_latency = round(total_latency / total_calls, 3)
+
     return {
-        "total_calls": len(usages),
-        "total_prompt_tokens": sum(u.prompt_tokens for u in usages),
-        "total_completion_tokens": sum(u.completion_tokens for u in usages),
-        "total_tokens": sum(u.total_tokens for u in usages),
-        "total_latency_s": round(sum(u.latency_s for u in usages), 3),
-        "avg_latency_s": round(sum(u.latency_s for u in usages) / len(usages), 3),
-        "by_model": _group_by_model(usages),
+        "total_calls": total_calls,
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_completion_tokens": total_completion_tokens,
+        "total_tokens": total_tokens,
+        "total_latency_s": round(total_latency, 3),
+        "avg_latency_s": avg_latency,
+        "by_model": by_model,
     }
 
 
