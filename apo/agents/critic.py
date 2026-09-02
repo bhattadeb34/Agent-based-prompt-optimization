@@ -253,7 +253,7 @@ META ADVICE:
         current_state: PromptState,
         history: PromptStateHistory,
         meta_advice: str = "",
-    ) -> Tuple[PromptState, Dict, LLMUsage]:
+    ) -> Tuple[PromptState, Dict, Dict]:
         """
         Main entry point: Refine strategy based on results.
 
@@ -272,6 +272,10 @@ META ADVICE:
         self.all_usages = []
 
         print(f"\n[CriticAgent] Refining strategy v{current_state.version} → v{current_state.version + 1}")
+
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        current_reward = self.reward_fn.compute(valid_candidates)
+        current_state.score = current_reward
 
         # Run ReAct loop
         result, steps = self.run(initial_state="")
