@@ -207,7 +207,7 @@ ANALYSIS SO FAR:
         if not self.history:
             return "No history"
 
-        recent = self.history.all()[-3:]
+        recent = self.history.get_recent(3)
         lines = []
         for state in recent:
             lines.append(f"v{state.version}: {state.strategy_text[:100]}...")
@@ -229,7 +229,7 @@ ANALYSIS SO FAR:
         self,
         history: PromptStateHistory,
         reward_history: List[float],
-    ) -> Tuple[str, Optional[LLMUsage]]:
+    ) -> Tuple[str, Optional[Dict]]:
         """
         Main entry point: Analyze state and provide advice if needed.
 

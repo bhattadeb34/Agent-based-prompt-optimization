@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Action, Observation, ReActAgent, Thought, Tool
@@ -28,6 +29,7 @@ from .tools import (
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
+from ..utils.smiles_utils import canonicalize, compute_similarity, validate_smiles
 
 
 class WorkerAgent(ReActAgent):
@@ -78,7 +80,7 @@ class WorkerAgent(ReActAgent):
         return [
             SMILESValidatorTool(),
             SMILESRepairTool(),
-            SimilarityCalculatorTool(),
+            SimilarityCalculatorTool(self.ctx),
             ChemistryKnowledgeTool(),
             BatchPropertyPredictorTool(self.surrogate, self.ctx.property_name),
         ]
@@ -389,79 +391,99 @@ Return JSON (ONLY JSON, no other text):
         )
         self.all_usages.append(usage)
 
-        # Parse JSON
         try:
-            data = json.loads(text)
-            candidates = []
-            for parent_entry in data.get("generated_molecules", data.get("parent_smiles", [])):
-                parent = parent_entry.get("parent", "")
-                for cand in parent_entry.get("candidates", []):
-                    candidates.append({
-                        "parent_smiles": parent,
-                        "child_smiles": cand.get("smiles", ""),
-                        "explanation": cand.get("explanation", ""),
-                    })
-            return candidates
-        except json.JSONDecodeError:
-            # Fallback: try to extract SMILES from text
+            data = self._parse_llm_json(text)
+        except ValueError:
             print(f"[WorkerAgent] JSON parse failed, attempting text extraction")
             return []
 
+        return self._extract_candidates_from_payload(data)
+
     def _validate_candidates(self, candidates_raw: List[Dict]) -> List[Dict]:
         """Validate candidates using RDKit and surrogate."""
-        validator = next((t for t in self.tools if t.name == "validate_smiles"), None)
-        if not validator:
-            # No validation tool, return as-is
-            for c in candidates_raw:
-                c["valid"] = True
-            return candidates_raw
+        parents_to_score = list(dict.fromkeys(
+            self.parent_smiles_list + [c.get("parent_smiles", "") for c in candidates_raw]
+        ))
+        parent_values = self._get_parent_properties([p for p in parents_to_score if p])
 
-        # Extract SMILES
-        smiles_list = [c["child_smiles"] for c in candidates_raw]
+        valid_children = []
+        valid_child_indices = []
+        prepared: List[Dict] = []
+        for cand in candidates_raw:
+            child_smiles = cand.get("child_smiles", "")
+            parent_smiles = cand.get("parent_smiles", "")
+            parent_canonical = canonicalize(parent_smiles) or parent_smiles
+            child_canonical = canonicalize(child_smiles)
 
-        # Validate
-        obs = validator.execute(smiles_list=smiles_list)
-        validation_results = obs.result if obs.success else []
+            cand["parent_smiles"] = parent_canonical
+            cand.setdefault("child_property", None)
+            cand.setdefault("parent_property", parent_values.get(parent_canonical))
+            cand.setdefault("improvement_factor", 0.0)
+            cand.setdefault("similarity", 0.0)
+            cand.setdefault("invalid_reason", "")
 
-        # Merge validation results back
+            if parent_canonical not in parent_values:
+                cand["valid"] = False
+                cand["invalid_reason"] = "unknown parent SMILES"
+            else:
+                ok, reason = validate_smiles(child_smiles, required_markers=self.ctx.smiles_markers)
+                if not ok:
+                    cand["valid"] = False
+                    cand["invalid_reason"] = reason
+                elif child_canonical is None:
+                    cand["valid"] = False
+                    cand["invalid_reason"] = "canonicalization failed"
+                else:
+                    cand["child_smiles"] = child_canonical
+                    valid_child_indices.append(len(prepared))
+                    valid_children.append(child_canonical)
+                    cand["valid"] = True
+            prepared.append(cand)
+
+        try:
+            child_predictions = self.surrogate.predict(valid_children) if valid_children else []
+            if len(child_predictions) != len(valid_children):
+                raise ValueError(
+                    f"predict returned {len(child_predictions)} values for {len(valid_children)} SMILES"
+                )
+        except Exception as e:
+            child_predictions = []
+            for idx in valid_child_indices:
+                prepared[idx]["valid"] = False
+                prepared[idx]["invalid_reason"] = f"prediction error: {e}"
+
         validated = []
-        for i, (cand, val_result) in enumerate(zip(candidates_raw, validation_results)):
-            cand["valid"] = val_result.get("valid", False)
-            if not cand["valid"]:
-                cand["invalid_reason"] = val_result.get("error", "unknown")
-
-            # Get parent and child properties
+        prediction_by_index = dict(zip(valid_child_indices, child_predictions))
+        for i, cand in enumerate(prepared):
             parent_smiles = cand["parent_smiles"]
             child_smiles = cand["child_smiles"]
 
-            if parent_smiles not in self.parent_cache:
-                try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
-                except:
-                    self.parent_cache[parent_smiles] = None
-
-            cand["parent_property"] = self.parent_cache.get(parent_smiles)
-
             if cand["valid"]:
-                try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
-                    if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
-                    else:
-                        cand["improvement_factor"] = 0.0
-
-                    # Calculate similarity
-                    sim_tool = next((t for t in self.tools if t.name == "calculate_similarity"), None)
-                    if sim_tool:
-                        sim_obs = sim_tool.execute(smiles1=parent_smiles, smiles2=child_smiles)
-                        cand["similarity"] = sim_obs.result.get("similarity", 0.0) if sim_obs.success else 0.0
-                    else:
-                        cand["similarity"] = 0.5  # Default
-
-                except Exception as e:
+                child_value = prediction_by_index.get(i)
+                parent_value = cand["parent_property"]
+                if child_value is None:
                     cand["valid"] = False
-                    cand["invalid_reason"] = f"Prediction failed: {str(e)}"
-            else:
+                    cand["invalid_reason"] = "surrogate returned None"
+                else:
+                    cand["child_property"] = child_value
+                    if self.ctx.maximize and parent_value and abs(parent_value) > 1e-15:
+                        improvement = child_value / parent_value
+                    elif (not self.ctx.maximize) and child_value and abs(child_value) > 1e-15:
+                        improvement = (parent_value or 0.0) / child_value
+                    else:
+                        improvement = 0.0
+                    cand["improvement_factor"] = round(improvement, 6)
+                    cand["similarity"] = round(
+                        compute_similarity(
+                            child_smiles,
+                            parent_smiles,
+                            similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                            marker_strip_tokens=self.ctx.marker_strip_tokens,
+                        ),
+                        6,
+                    )
+
+            if not cand["valid"]:
                 cand["child_property"] = None
                 cand["improvement_factor"] = 0.0
                 cand["similarity"] = 0.0
@@ -469,6 +491,81 @@ Return JSON (ONLY JSON, no other text):
             validated.append(cand)
 
         return validated
+
+    @staticmethod
+    def _parse_llm_json(text: str) -> Dict:
+        """Parse JSON from raw LLM output, including fenced responses."""
+        text = text.strip()
+        if "```" in text:
+            text = re.sub(r"```(?:json)?\n?", "", text).strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    pass
+        raise ValueError("Could not parse JSON")
+
+    @staticmethod
+    def _extract_candidates_from_payload(data: Dict) -> List[Dict]:
+        """Normalize supported worker JSON shapes into candidate dicts."""
+        candidates: List[Dict] = []
+        generated = data.get("generated_molecules")
+
+        if isinstance(generated, dict):
+            for parent, payload in generated.items():
+                if not isinstance(payload, dict):
+                    continue
+                smiles_list = payload.get("smiles", [])
+                reasoning_list = payload.get("reasoning", [""] * len(smiles_list))
+                for child, reason in zip(smiles_list, reasoning_list):
+                    candidates.append({
+                        "parent_smiles": parent,
+                        "child_smiles": child,
+                        "explanation": reason,
+                    })
+            return candidates
+
+        parent_entries = generated if isinstance(generated, list) else data.get("parent_smiles", [])
+        if not isinstance(parent_entries, list):
+            return candidates
+
+        for parent_entry in parent_entries:
+            if not isinstance(parent_entry, dict):
+                continue
+            parent = parent_entry.get("parent", "")
+            for cand in parent_entry.get("candidates", []):
+                if not isinstance(cand, dict):
+                    continue
+                candidates.append({
+                    "parent_smiles": parent,
+                    "child_smiles": cand.get("smiles", ""),
+                    "explanation": cand.get("explanation", ""),
+                })
+        return candidates
+
+    def _get_parent_properties(self, parent_smiles: List[str]) -> Dict[str, Optional[float]]:
+        """Fetch parent properties with canonical cache keys using batch prediction."""
+        canonical_parents = [canonicalize(s) or s for s in parent_smiles]
+        for raw, canonical in zip(parent_smiles, canonical_parents):
+            if canonical not in self.parent_cache and raw in self.parent_cache:
+                self.parent_cache[canonical] = self.parent_cache[raw]
+        missing = [s for s in canonical_parents if s not in self.parent_cache]
+        if missing:
+            try:
+                predictions = self.surrogate.predict(missing)
+                if len(predictions) != len(missing):
+                    raise ValueError(
+                        f"predict returned {len(predictions)} values for {len(missing)} SMILES"
+                    )
+            except Exception:
+                predictions = [None] * len(missing)
+            for smi, value in zip(missing, predictions):
+                self.parent_cache[smi] = value
+        return {s: self.parent_cache.get(s) for s in canonical_parents}
 
     def _build_examples(self) -> str:
         """Build few-shot examples from parent SMILES."""

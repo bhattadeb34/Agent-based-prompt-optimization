@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .base import Observation, Tool
+from ..utils.smiles_utils import compute_similarity
 
 
 class SMILESValidatorTool(Tool):
@@ -164,6 +165,9 @@ class SMILESRepairTool(Tool):
 class SimilarityCalculatorTool(Tool):
     """Calculate structural similarity between molecules."""
 
+    def __init__(self, task_context=None):
+        self.ctx = task_context
+
     @property
     def name(self) -> str:
         return "calculate_similarity"
@@ -204,9 +208,17 @@ class SimilarityCalculatorTool(Tool):
                 error="One or both SMILES are invalid",
             )
 
-        fp1 = AllChem.GetMorganFingerprint(mol1, 2)
-        fp2 = AllChem.GetMorganFingerprint(mol2, 2)
-        similarity = DataStructs.TanimotoSimilarity(fp1, fp2)
+        if self.ctx:
+            similarity = compute_similarity(
+                smiles1,
+                smiles2,
+                similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                marker_strip_tokens=self.ctx.marker_strip_tokens,
+            )
+        else:
+            fp1 = AllChem.GetMorganFingerprint(mol1, 2)
+            fp2 = AllChem.GetMorganFingerprint(mol2, 2)
+            similarity = DataStructs.TanimotoSimilarity(fp1, fp2)
 
         return Observation(
             success=True,
@@ -243,7 +255,7 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            value = self.surrogate.predict_single(smiles)
             if value is None:
                 return Observation(
                     success=False,
@@ -373,20 +385,26 @@ class BatchPropertyPredictorTool(Tool):
     def execute(self, smiles_list: List[str]) -> Observation:
         """Batch prediction."""
         results = []
-        for smi in smiles_list:
-            try:
-                value = self.surrogate.predict(smi)
-                results.append({
-                    "smiles": smi,
-                    "property": value,
-                    "valid": value is not None,
-                })
-            except Exception as e:
+        try:
+            predictions = self.surrogate.predict(smiles_list)
+            if len(predictions) != len(smiles_list):
+                raise ValueError(
+                    f"predict returned {len(predictions)} values for {len(smiles_list)} SMILES"
+                )
+        except Exception as e:
+            for smi in smiles_list:
                 results.append({
                     "smiles": smi,
                     "property": None,
                     "valid": False,
                     "error": str(e),
+                })
+        else:
+            for smi, value in zip(smiles_list, predictions):
+                results.append({
+                    "smiles": smi,
+                    "property": value,
+                    "valid": value is not None,
                 })
 
         n_valid = sum(1 for r in results if r["valid"])
