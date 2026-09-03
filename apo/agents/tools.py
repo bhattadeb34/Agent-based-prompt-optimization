@@ -243,7 +243,7 @@ class PropertyPredictorTool(Tool):
     def execute(self, smiles: str) -> Observation:
         """Predict property value."""
         try:
-            value = self.surrogate.predict(smiles)
+            value = self.surrogate.predict_single(smiles)
             if value is None:
                 return Observation(
                     success=False,
@@ -373,20 +373,37 @@ class BatchPropertyPredictorTool(Tool):
     def execute(self, smiles_list: List[str]) -> Observation:
         """Batch prediction."""
         results = []
-        for smi in smiles_list:
-            try:
-                value = self.surrogate.predict(smi)
-                results.append({
-                    "smiles": smi,
-                    "property": value,
-                    "valid": value is not None,
-                })
-            except Exception as e:
+        try:
+            values = self.surrogate.predict(smiles_list)
+            if len(values) != len(smiles_list):
+                raise ValueError(
+                    f"predict returned {len(values)} values for {len(smiles_list)} SMILES"
+                )
+        except Exception as e:
+            values = [None] * len(smiles_list)
+            errors = [str(e)] * len(smiles_list)
+        else:
+            errors = [""] * len(smiles_list)
+
+        for smi, value, error in zip(smiles_list, values, errors):
+            result = {
+                "smiles": smi,
+                "property": value,
+                "valid": value is not None,
+            }
+            if error:
+                result["error"] = error
+            results.append(result)
+
+        if not smiles_list:
+            results = []
+        elif len(results) < len(smiles_list):
+            for smi in smiles_list[len(results):]:
                 results.append({
                     "smiles": smi,
                     "property": None,
                     "valid": False,
-                    "error": str(e),
+                    "error": "prediction result missing",
                 })
 
         n_valid = sum(1 for r in results if r["valid"])
