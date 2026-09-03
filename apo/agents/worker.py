@@ -403,6 +403,16 @@ Return JSON (ONLY JSON, no other text):
         generated = data.get("generated_molecules")
         if isinstance(generated, dict):
             for parent, gen_dict in generated.items():
+                if isinstance(gen_dict, list):
+                    for cand in gen_dict:
+                        if not isinstance(cand, dict):
+                            continue
+                        candidates.append({
+                            "parent_smiles": parent,
+                            "child_smiles": cand.get("smiles", ""),
+                            "explanation": cand.get("explanation", ""),
+                        })
+                    continue
                 if not isinstance(gen_dict, dict):
                     continue
                 smiles_list = gen_dict.get("smiles", [])

@@ -1,9 +1,10 @@
 """Regression tests for critical agentic-mode correctness paths."""
 from typing import List, Optional
 
+from apo.agents.meta import MetaAgent
 from apo.agents.worker import WorkerAgent
 from apo.core.llm_client import LLMUsage
-from apo.core.prompt_state import PromptState
+from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.logging.run_logger import RunLogger
 from apo.surrogates.base import SurrogatePredictor
 from apo.task_context import TaskContext
@@ -92,6 +93,42 @@ def test_worker_parses_existing_generated_molecules_schema(monkeypatch):
     ]
 
 
+def test_worker_parses_generated_molecules_list_schema(monkeypatch):
+    parent = "CC"
+    child = "CCO"
+    response = (
+        "```json\n"
+        f'{{"generated_molecules": {{"{parent}": [{{"smiles": "{child}", "explanation": "reason"}}]}}}}\n'
+        "```"
+    )
+    monkeypatch.setattr(
+        "apo.agents.worker.call_llm",
+        lambda *args, **kwargs: (response, LLMUsage("mock", 1, 1, 0.1)),
+    )
+    ctx = TaskContext(property_name="MockProperty", molecule_type="organic")
+    worker = WorkerAgent("mock", {}, ctx, StrictSurrogate(), {}, max_retries_per_batch=0)
+
+    candidates = worker._call_llm_for_generation()
+
+    assert candidates == [
+        {"parent_smiles": parent, "child_smiles": child, "explanation": "reason"}
+    ]
+
+
+def test_meta_agent_formats_recent_history_without_crashing():
+    history = PromptStateHistory()
+    for version in range(4):
+        history.add(PromptState(strategy_text=f"strategy {version}", version=version))
+    ctx = TaskContext(property_name="MockProperty", molecule_type="organic")
+    meta = MetaAgent("mock", {}, ctx)
+    meta.history = history
+
+    formatted = meta._format_recent_strategies()
+
+    assert "v1: strategy 1" in formatted
+    assert "v3: strategy 3" in formatted
+
+
 def test_agentic_engine_scores_evaluated_state_and_merges_usage(monkeypatch, tmp_path):
     from apo import agentic_engine
 
@@ -166,13 +203,14 @@ def test_agentic_engine_scores_evaluated_state_and_merges_usage(monkeypatch, tmp
             "n_per_molecule": 1,
             "batch_size": 1,
             "meta_interval": 1,
-            "reward_function": "pareto_hypervolume",
+            "reward_function": "weighted_sum",
+            "reward_function_kwargs": {"alpha": 0.25},
         },
     }
 
     agentic_engine.run_agentic_mode(cfg, ctx, [parent], logger, {})
 
     records = logger.load_existing_epochs()
-    assert records[0]["reward"] == 1.0
+    assert records[0]["reward"] == 0.875
     assert records[0]["prompt_state"]["version"] == 0
-    assert records[0]["prompt_state"]["score"] == 1.0
+    assert records[0]["prompt_state"]["score"] == 0.875
