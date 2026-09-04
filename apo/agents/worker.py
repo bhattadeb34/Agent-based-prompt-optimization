@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Action, Observation, ReActAgent, Thought, Tool
@@ -28,6 +29,7 @@ from .tools import (
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
+from ..utils.smiles_utils import canonicalize, compute_similarity, validate_smiles
 
 
 class WorkerAgent(ReActAgent):
@@ -389,23 +391,82 @@ Return JSON (ONLY JSON, no other text):
         )
         self.all_usages.append(usage)
 
-        # Parse JSON
         try:
-            data = json.loads(text)
-            candidates = []
-            for parent_entry in data.get("generated_molecules", data.get("parent_smiles", [])):
-                parent = parent_entry.get("parent", "")
-                for cand in parent_entry.get("candidates", []):
-                    candidates.append({
-                        "parent_smiles": parent,
-                        "child_smiles": cand.get("smiles", ""),
-                        "explanation": cand.get("explanation", ""),
-                    })
-            return candidates
-        except json.JSONDecodeError:
-            # Fallback: try to extract SMILES from text
+            data = self._parse_generation_output(text)
+        except (json.JSONDecodeError, ValueError):
             print(f"[WorkerAgent] JSON parse failed, attempting text extraction")
             return []
+
+        candidates = []
+        for parent, child_smiles, explanation in self._iter_generated_candidates(data):
+            candidates.append({
+                "parent_smiles": parent,
+                "child_smiles": child_smiles,
+                "explanation": explanation,
+            })
+        return candidates
+
+    @staticmethod
+    def _parse_generation_output(text: str) -> Dict:
+        """Parse LLM JSON, accepting common fenced JSON responses."""
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text).strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if not match:
+                raise
+            return json.loads(match.group(0))
+
+    @staticmethod
+    def _iter_generated_candidates(data: Dict):
+        """Yield parent/child/explanation triples from supported output schemas."""
+        generated = data.get("generated_molecules")
+        if isinstance(generated, dict):
+            for parent, payload in generated.items():
+                if not isinstance(payload, dict):
+                    continue
+                candidates = payload.get("candidates")
+                if candidates is not None:
+                    for cand in candidates:
+                        if isinstance(cand, dict):
+                            yield parent, cand.get("smiles", ""), cand.get("explanation", "")
+                        else:
+                            yield parent, cand, ""
+                    continue
+
+                smiles_values = payload.get("smiles", [])
+                reasoning_values = payload.get("reasoning", [])
+                for i, child in enumerate(smiles_values):
+                    explanation = reasoning_values[i] if i < len(reasoning_values) else ""
+                    yield parent, child, explanation
+            return
+
+        entries = generated if isinstance(generated, list) else data.get("parent_smiles", [])
+        if isinstance(entries, dict):
+            entries = [
+                {"parent": parent, **payload}
+                for parent, payload in entries.items()
+                if isinstance(payload, dict)
+            ]
+        if not isinstance(entries, list):
+            return
+
+        for parent_entry in entries:
+            if not isinstance(parent_entry, dict):
+                continue
+            parent = parent_entry.get("parent", "")
+            candidates = parent_entry.get("candidates", [])
+            if isinstance(candidates, dict):
+                candidates = candidates.get("smiles", [])
+            for cand in candidates:
+                if isinstance(cand, dict):
+                    yield parent, cand.get("smiles", ""), cand.get("explanation", "")
+                else:
+                    yield parent, cand, ""
 
     def _validate_candidates(self, candidates_raw: List[Dict]) -> List[Dict]:
         """Validate candidates using RDKit and surrogate."""
@@ -426,37 +487,56 @@ Return JSON (ONLY JSON, no other text):
         # Merge validation results back
         validated = []
         for i, (cand, val_result) in enumerate(zip(candidates_raw, validation_results)):
-            cand["valid"] = val_result.get("valid", False)
+            marker_ok, marker_reason = validate_smiles(
+                cand["child_smiles"],
+                required_markers=self.ctx.smiles_markers,
+            )
+            cand["valid"] = val_result.get("valid", False) and marker_ok
             if not cand["valid"]:
-                cand["invalid_reason"] = val_result.get("error", "unknown")
+                cand["invalid_reason"] = (
+                    marker_reason or val_result.get("error", "unknown")
+                )
 
             # Get parent and child properties
-            parent_smiles = cand["parent_smiles"]
+            parent_smiles = canonicalize(cand["parent_smiles"]) or cand["parent_smiles"]
             child_smiles = cand["child_smiles"]
 
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
-                except:
+                    self.parent_cache[parent_smiles] = self.surrogate.predict_single(parent_smiles)
+                except Exception:
                     self.parent_cache[parent_smiles] = None
 
+            cand["parent_smiles"] = parent_smiles
             cand["parent_property"] = self.parent_cache.get(parent_smiles)
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
-                    if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                    child_canonical = canonicalize(child_smiles)
+                    if child_canonical is None:
+                        raise ValueError("canonicalization failed")
+                    cand["child_smiles"] = child_canonical
+
+                    cand["child_property"] = self.surrogate.predict_single(child_canonical)
+                    if (
+                        cand["child_property"] is not None
+                        and cand["parent_property"] is not None
+                        and abs(cand["parent_property"]) > 1e-15
+                        and (self.ctx.maximize or abs(cand["child_property"]) > 1e-15)
+                    ):
+                        if self.ctx.maximize:
+                            cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                        else:
+                            cand["improvement_factor"] = cand["parent_property"] / cand["child_property"]
                     else:
                         cand["improvement_factor"] = 0.0
 
-                    # Calculate similarity
-                    sim_tool = next((t for t in self.tools if t.name == "calculate_similarity"), None)
-                    if sim_tool:
-                        sim_obs = sim_tool.execute(smiles1=parent_smiles, smiles2=child_smiles)
-                        cand["similarity"] = sim_obs.result.get("similarity", 0.0) if sim_obs.success else 0.0
-                    else:
-                        cand["similarity"] = 0.5  # Default
+                    cand["similarity"] = compute_similarity(
+                        parent_smiles,
+                        child_canonical,
+                        similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                        marker_strip_tokens=self.ctx.marker_strip_tokens,
+                    )
 
                 except Exception as e:
                     cand["valid"] = False
