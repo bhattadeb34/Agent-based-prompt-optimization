@@ -2,10 +2,11 @@ import json
 from typing import List, Optional
 
 from apo.agentic_engine import run_agentic_mode
+from apo.agents.meta import MetaAgent
 from apo.agents.tools import BatchPropertyPredictorTool, PropertyPredictorTool
 from apo.agents.worker import WorkerAgent
 from apo.core.llm_client import LLMUsage
-from apo.core.prompt_state import PromptState
+from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.surrogates.base import SurrogatePredictor
 from apo.task_context import TaskContext
 
@@ -181,3 +182,38 @@ def test_run_agentic_mode_logs_rewards_and_merges_usage_dicts(monkeypatch):
     assert run_dir == "fake-run"
     assert logger.epochs[0]["reward"] > 0
     assert logger.prompt_history[0]["score"] == logger.epochs[0]["reward"]
+
+
+def test_meta_agent_formats_recent_strategy_history_without_crashing(monkeypatch):
+    history = PromptStateHistory()
+    history.add(PromptState.seed("seed strategy"))
+    history.add(PromptState(strategy_text="first refinement", version=1, rationale="r"))
+    history.add(PromptState(strategy_text="second refinement", version=2, rationale="r"))
+
+    agent = MetaAgent(
+        model="meta-model",
+        api_keys={},
+        task_context=TaskContext(property_name="TestProp"),
+    )
+    agent.history = history
+    agent.reward_history = [1.0, 1.0, 1.0]
+    agent.recent_analysis = {"pattern": "plateau", "confidence": 0.9}
+    agent.should_intervene = True
+
+    def fake_call_llm(**kwargs):
+        assert "second refinement" in kwargs["messages"][1]["content"]
+        return (
+            json.dumps({
+                "advice": "try a new region",
+                "rationale": "plateau",
+                "expected_outcome": "improvement",
+                "confidence": 0.8,
+            }),
+            LLMUsage("meta-model", 1, 1, 0.1),
+        )
+
+    monkeypatch.setattr("apo.agents.meta.call_llm", fake_call_llm)
+
+    thought = agent._generate_advice_text()
+
+    assert thought.content == "try a new region"
