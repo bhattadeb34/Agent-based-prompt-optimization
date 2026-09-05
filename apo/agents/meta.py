@@ -229,7 +229,7 @@ ANALYSIS SO FAR:
         self,
         history: PromptStateHistory,
         reward_history: List[float],
-    ) -> Tuple[str, Optional[LLMUsage]]:
+    ) -> Tuple[str, Optional[Dict]]:
         """
         Main entry point: Analyze state and provide advice if needed.
 
