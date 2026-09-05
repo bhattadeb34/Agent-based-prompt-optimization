@@ -3,9 +3,11 @@
 from typing import List, Optional
 
 from apo.agentic_engine import _merge_usage_summary
+from apo.agents.meta import MetaAgent
 from apo.agents.tools import BatchPropertyPredictorTool, PropertyPredictorTool
 from apo.agents.worker import WorkerAgent
 from apo.core.llm_client import LLMUsage, aggregate_usage
+from apo.core.prompt_state import PromptState, PromptStateHistory
 from apo.surrogates.base import SurrogatePredictor
 from apo.task_context import TaskContext
 
@@ -110,3 +112,25 @@ def test_merge_usage_summary_keeps_dicts_out_of_aggregate_usage():
     assert merged["total_tokens"] == 43
     assert merged["by_model"]["worker-model"] == {"calls": 1, "tokens": 15}
     assert merged["by_model"]["critic-model"] == {"calls": 2, "tokens": 28}
+
+
+def test_meta_agent_formats_recent_strategies_with_history_api():
+    ctx = TaskContext(
+        property_name="Mock Property",
+        property_units="units",
+        maximize=True,
+        molecule_type="organic compound",
+    )
+    history = PromptStateHistory()
+    for version in range(4):
+        history.add(PromptState(strategy_text=f"strategy {version}", version=version))
+
+    meta = MetaAgent(model="mock-model", api_keys={}, task_context=ctx)
+    meta.history = history
+
+    formatted = meta._format_recent_strategies()
+
+    assert "v1: strategy 1" in formatted
+    assert "v2: strategy 2" in formatted
+    assert "v3: strategy 3" in formatted
+    assert "v0: strategy 0" not in formatted
