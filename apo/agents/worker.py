@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Action, Observation, ReActAgent, Thought, Tool
@@ -25,6 +26,7 @@ from .tools import (
     SimilarityCalculatorTool,
     SMILESRepairTool,
     SMILESValidatorTool,
+    _predict_single,
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
@@ -76,9 +78,9 @@ class WorkerAgent(ReActAgent):
     def _init_tools(self) -> List[Tool]:
         """Tools available to Worker agent."""
         return [
-            SMILESValidatorTool(),
+            SMILESValidatorTool(self.ctx),
             SMILESRepairTool(),
-            SimilarityCalculatorTool(),
+            SimilarityCalculatorTool(self.ctx),
             ChemistryKnowledgeTool(),
             BatchPropertyPredictorTool(self.surrogate, self.ctx.property_name),
         ]
@@ -389,23 +391,41 @@ Return JSON (ONLY JSON, no other text):
         )
         self.all_usages.append(usage)
 
-        # Parse JSON
-        try:
-            data = json.loads(text)
-            candidates = []
-            for parent_entry in data.get("generated_molecules", data.get("parent_smiles", [])):
-                parent = parent_entry.get("parent", "")
-                for cand in parent_entry.get("candidates", []):
+        data = self._parse_llm_json(text)
+        candidates = []
+        generated = data.get("generated_molecules")
+        if isinstance(generated, dict):
+            for parent, gen_dict in generated.items():
+                smiles_list = gen_dict.get("smiles", []) if isinstance(gen_dict, dict) else []
+                reasoning = gen_dict.get("reasoning", []) if isinstance(gen_dict, dict) else []
+                for idx, child_smiles in enumerate(smiles_list):
                     candidates.append({
                         "parent_smiles": parent,
-                        "child_smiles": cand.get("smiles", ""),
-                        "explanation": cand.get("explanation", ""),
+                        "child_smiles": child_smiles,
+                        "explanation": reasoning[idx] if idx < len(reasoning) else "",
                     })
             return candidates
-        except json.JSONDecodeError:
-            # Fallback: try to extract SMILES from text
-            print(f"[WorkerAgent] JSON parse failed, attempting text extraction")
-            return []
+
+        parent_entries = data.get("parent_smiles", [])
+        if isinstance(parent_entries, list):
+            for parent_entry in parent_entries:
+                if not isinstance(parent_entry, dict):
+                    continue
+                parent = parent_entry.get("parent", "")
+                for cand in parent_entry.get("candidates", []):
+                    if isinstance(cand, dict):
+                        candidates.append({
+                            "parent_smiles": parent,
+                            "child_smiles": cand.get("smiles", ""),
+                            "explanation": cand.get("explanation", ""),
+                        })
+                    elif isinstance(cand, str):
+                        candidates.append({
+                            "parent_smiles": parent,
+                            "child_smiles": cand,
+                            "explanation": "",
+                        })
+        return candidates
 
     def _validate_candidates(self, candidates_raw: List[Dict]) -> List[Dict]:
         """Validate candidates using RDKit and surrogate."""
@@ -436,7 +456,7 @@ Return JSON (ONLY JSON, no other text):
 
             if parent_smiles not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
+                    self.parent_cache[parent_smiles] = _predict_single(self.surrogate, parent_smiles)
                 except:
                     self.parent_cache[parent_smiles] = None
 
@@ -444,16 +464,26 @@ Return JSON (ONLY JSON, no other text):
 
             if cand["valid"]:
                 try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
-                    if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                    canonical = val_result.get("canonical") or child_smiles
+                    cand["child_smiles"] = canonical
+                    cand["child_property"] = _predict_single(self.surrogate, canonical)
+                    if cand["child_property"] is None:
+                        cand["valid"] = False
+                        cand["invalid_reason"] = "surrogate returned None"
+                    elif cand["parent_property"] and abs(cand["parent_property"]) > 1e-15:
+                        if self.ctx.maximize:
+                            cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
+                        elif abs(cand["child_property"]) > 1e-15:
+                            cand["improvement_factor"] = cand["parent_property"] / cand["child_property"]
+                        else:
+                            cand["improvement_factor"] = 0.0
                     else:
                         cand["improvement_factor"] = 0.0
 
                     # Calculate similarity
                     sim_tool = next((t for t in self.tools if t.name == "calculate_similarity"), None)
                     if sim_tool:
-                        sim_obs = sim_tool.execute(smiles1=parent_smiles, smiles2=child_smiles)
+                        sim_obs = sim_tool.execute(smiles1=parent_smiles, smiles2=canonical)
                         cand["similarity"] = sim_obs.result.get("similarity", 0.0) if sim_obs.success else 0.0
                     else:
                         cand["similarity"] = 0.5  # Default
@@ -469,6 +499,24 @@ Return JSON (ONLY JSON, no other text):
             validated.append(cand)
 
         return validated
+
+    @staticmethod
+    def _parse_llm_json(text: str) -> Dict:
+        """Parse JSON from common raw or fenced LLM responses."""
+        text = text.strip()
+        if "```" in text:
+            text = re.sub(r"```(?:json)?\n?", "", text).strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    pass
+        print(f"[WorkerAgent] JSON parse failed, attempting text extraction")
+        return {}
 
     def _build_examples(self) -> str:
         """Build few-shot examples from parent SMILES."""
