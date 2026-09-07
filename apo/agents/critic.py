@@ -273,6 +273,9 @@ META ADVICE:
 
         print(f"\n[CriticAgent] Refining strategy v{current_state.version} → v{current_state.version + 1}")
 
+        valid_candidates = [c for c in candidates if c.get("valid")]
+        current_state.score = self.reward_fn.compute(valid_candidates)
+
         # Run ReAct loop
         result, steps = self.run(initial_state="")
 
@@ -442,6 +445,10 @@ Return JSON:
                 rationale=selected["rationale"],
                 parent_version=self.current_state.version,
                 model_used=self.model,
+                metadata={
+                    "reward": self.current_state.score,
+                    "n_valid": len([c for c in self.candidates if c.get("valid")]),
+                },
             )
 
             return Thought(
@@ -457,6 +464,10 @@ Return JSON:
                 rationale="Fallback (JSON parse failed)",
                 parent_version=self.current_state.version,
                 model_used=self.model,
+                metadata={
+                    "reward": self.current_state.score,
+                    "n_valid": len([c for c in self.candidates if c.get("valid")]),
+                },
             )
             return Thought(content=text)
 
