@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import Action, Observation, ReActAgent, Thought, Tool
@@ -28,6 +29,7 @@ from .tools import (
 )
 from ..core.llm_client import LLMUsage, call_llm
 from ..task_context import TaskContext
+from ..utils.smiles_utils import canonicalize, compute_similarity, validate_smiles
 
 
 class WorkerAgent(ReActAgent):
@@ -78,7 +80,10 @@ class WorkerAgent(ReActAgent):
         return [
             SMILESValidatorTool(),
             SMILESRepairTool(),
-            SimilarityCalculatorTool(),
+            SimilarityCalculatorTool(
+                similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                marker_strip_tokens=self.ctx.marker_strip_tokens,
+            ),
             ChemistryKnowledgeTool(),
             BatchPropertyPredictorTool(self.surrogate, self.ctx.property_name),
         ]
@@ -320,8 +325,7 @@ Return JSON:
         # Validate using tools
         validated_candidates = self._validate_candidates(candidates_raw)
 
-        # Add to results
-        self.generated_candidates.extend(validated_candidates)
+        self._merge_candidates(validated_candidates)
 
         n_valid = sum(1 for c in validated_candidates if c.get("valid"))
         n_total = len(validated_candidates)
@@ -391,84 +395,145 @@ Return JSON (ONLY JSON, no other text):
 
         # Parse JSON
         try:
-            data = json.loads(text)
+            data = self._parse_generation_json(text)
             candidates = []
-            for parent_entry in data.get("generated_molecules", data.get("parent_smiles", [])):
-                parent = parent_entry.get("parent", "")
-                for cand in parent_entry.get("candidates", []):
+            for parent, smiles_entries, reasoning_entries in self._iter_generation_entries(data):
+                for idx, child in enumerate(smiles_entries):
+                    if isinstance(child, dict):
+                        child_smiles = child.get("smiles", "")
+                        explanation = child.get("explanation", "")
+                    else:
+                        child_smiles = str(child)
+                        explanation = ""
+                    if idx < len(reasoning_entries):
+                        explanation = explanation or str(reasoning_entries[idx])
                     candidates.append({
                         "parent_smiles": parent,
-                        "child_smiles": cand.get("smiles", ""),
-                        "explanation": cand.get("explanation", ""),
+                        "child_smiles": child_smiles,
+                        "explanation": explanation,
                     })
             return candidates
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError):
             # Fallback: try to extract SMILES from text
             print(f"[WorkerAgent] JSON parse failed, attempting text extraction")
             return []
 
     def _validate_candidates(self, candidates_raw: List[Dict]) -> List[Dict]:
         """Validate candidates using RDKit and surrogate."""
-        validator = next((t for t in self.tools if t.name == "validate_smiles"), None)
-        if not validator:
-            # No validation tool, return as-is
-            for c in candidates_raw:
-                c["valid"] = True
-            return candidates_raw
-
-        # Extract SMILES
-        smiles_list = [c["child_smiles"] for c in candidates_raw]
-
-        # Validate
-        obs = validator.execute(smiles_list=smiles_list)
-        validation_results = obs.result if obs.success else []
-
-        # Merge validation results back
         validated = []
-        for i, (cand, val_result) in enumerate(zip(candidates_raw, validation_results)):
-            cand["valid"] = val_result.get("valid", False)
-            if not cand["valid"]:
-                cand["invalid_reason"] = val_result.get("error", "unknown")
+        for raw in candidates_raw:
+            parent_raw = raw.get("parent_smiles", "")
+            child_raw = raw.get("child_smiles", "")
+            cand = {
+                "parent_smiles": canonicalize(parent_raw) or parent_raw,
+                "child_smiles": child_raw,
+                "explanation": raw.get("explanation", ""),
+                "parent_property": None,
+                "child_property": None,
+                "improvement_factor": 0.0,
+                "similarity": 0.0,
+                "valid": False,
+                "invalid_reason": "",
+            }
 
-            # Get parent and child properties
-            parent_smiles = cand["parent_smiles"]
-            child_smiles = cand["child_smiles"]
+            ok, reason = validate_smiles(child_raw, required_markers=self.ctx.smiles_markers)
+            if not ok:
+                cand["invalid_reason"] = reason
+                validated.append(cand)
+                continue
 
-            if parent_smiles not in self.parent_cache:
+            child_smiles = canonicalize(child_raw)
+            if child_smiles is None:
+                cand["invalid_reason"] = "canonicalization failed"
+                validated.append(cand)
+                continue
+            cand["child_smiles"] = child_smiles
+
+            parent_key = cand["parent_smiles"]
+            if parent_key not in self.parent_cache:
                 try:
-                    self.parent_cache[parent_smiles] = self.surrogate.predict(parent_smiles)
-                except:
-                    self.parent_cache[parent_smiles] = None
+                    self.parent_cache[parent_key] = self.surrogate.predict_single(parent_key)
+                except Exception:
+                    self.parent_cache[parent_key] = None
 
-            cand["parent_property"] = self.parent_cache.get(parent_smiles)
+            parent_value = self.parent_cache.get(parent_key)
+            cand["parent_property"] = parent_value
+            if parent_value is None:
+                cand["invalid_reason"] = "parent prediction failed"
+                validated.append(cand)
+                continue
 
-            if cand["valid"]:
-                try:
-                    cand["child_property"] = self.surrogate.predict(child_smiles)
-                    if cand["child_property"] and cand["parent_property"]:
-                        cand["improvement_factor"] = cand["child_property"] / cand["parent_property"]
-                    else:
-                        cand["improvement_factor"] = 0.0
+            try:
+                child_value = self.surrogate.predict_single(child_smiles)
+            except Exception as e:
+                cand["invalid_reason"] = f"Prediction failed: {str(e)}"
+                validated.append(cand)
+                continue
+            if child_value is None:
+                cand["invalid_reason"] = "child prediction failed"
+                validated.append(cand)
+                continue
 
-                    # Calculate similarity
-                    sim_tool = next((t for t in self.tools if t.name == "calculate_similarity"), None)
-                    if sim_tool:
-                        sim_obs = sim_tool.execute(smiles1=parent_smiles, smiles2=child_smiles)
-                        cand["similarity"] = sim_obs.result.get("similarity", 0.0) if sim_obs.success else 0.0
-                    else:
-                        cand["similarity"] = 0.5  # Default
-
-                except Exception as e:
-                    cand["valid"] = False
-                    cand["invalid_reason"] = f"Prediction failed: {str(e)}"
-            else:
-                cand["child_property"] = None
-                cand["improvement_factor"] = 0.0
-                cand["similarity"] = 0.0
+            denominator = parent_value if self.ctx.maximize else child_value
+            numerator = child_value if self.ctx.maximize else parent_value
+            improvement = numerator / denominator if abs(denominator) > 1e-15 else 0.0
+            similarity = compute_similarity(
+                child_smiles,
+                parent_key,
+                similarity_on_repeat_unit=self.ctx.similarity_on_repeat_unit,
+                marker_strip_tokens=self.ctx.marker_strip_tokens,
+            )
+            cand.update({
+                "child_property": child_value,
+                "improvement_factor": round(improvement, 6),
+                "similarity": round(similarity, 6),
+                "valid": True,
+            })
 
             validated.append(cand)
 
         return validated
+
+    @staticmethod
+    def _parse_generation_json(text: str) -> Dict:
+        clean = text.strip()
+        if "```" in clean:
+            clean = re.sub(r"```(?:json)?\n?", "", clean).strip()
+        try:
+            return json.loads(clean)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", clean, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            raise
+
+    @staticmethod
+    def _iter_generation_entries(data: Dict):
+        generated = data.get("generated_molecules")
+        if isinstance(generated, dict):
+            for parent, payload in generated.items():
+                if isinstance(payload, dict):
+                    yield parent, payload.get("smiles", []), payload.get("reasoning", [])
+                elif isinstance(payload, list):
+                    yield parent, payload, []
+            return
+
+        parent_entries = data.get("parent_smiles", [])
+        if isinstance(parent_entries, list):
+            for entry in parent_entries:
+                if not isinstance(entry, dict):
+                    continue
+                yield entry.get("parent", ""), entry.get("candidates", []), []
+
+    def _merge_candidates(self, new_candidates: List[Dict]) -> None:
+        merged: Dict[Tuple[str, str], Dict] = {
+            (c.get("parent_smiles", ""), c.get("child_smiles", "")): c
+            for c in self.generated_candidates
+        }
+        for candidate in new_candidates:
+            key = (candidate.get("parent_smiles", ""), candidate.get("child_smiles", ""))
+            merged[key] = candidate
+        self.generated_candidates = list(merged.values())
 
     def _build_examples(self) -> str:
         """Build few-shot examples from parent SMILES."""
